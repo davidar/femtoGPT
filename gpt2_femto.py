@@ -21,10 +21,16 @@ n_ctx = hparams["n_ctx"]
 n_embd = hparams["n_embd"]
 n_head = hparams["n_head"]
 n_layer = hparams["n_layer"]
+D = int(n_embd / n_head)
 
 params = safetensors.numpy.load_file("models/gpt2/model.safetensors")
 for k, v in params.items():
     print(k, v.shape)
+
+wte = params["wte.weight"]
+wpe = params["wpe.weight"]
+w_ln = params["ln_f.weight"]
+b_ln = params["ln_f.bias"]
 
 
 def gelu(x):
@@ -40,44 +46,41 @@ def standardise_rows(x):
 
 
 def gpt2(inputs):
-    wte = params["wte.weight"]
-    wpe = params["wpe.weight"]
-    g_f = params["ln_f.weight"]
-    b_f = params["ln_f.bias"]
-    dk = int(n_embd / n_head)
     n_seq = len(inputs)
     x = wte[inputs] + wpe[:n_seq]
     mask = np.tri(n_seq, dtype=x.dtype)
     for b in range(n_layer):
-        w_attn2 = (
+        w_attn1 = (
             params[f"h.{b}.ln_1.weight"][:, None] * params[f"h.{b}.attn.c_attn.weight"]
         )
-        b_attn2 = (
+        b_attn1 = (
             params[f"h.{b}.ln_1.bias"] @ params[f"h.{b}.attn.c_attn.weight"]
             + params[f"h.{b}.attn.c_attn.bias"]
         )
-        w_attn_proj = params[f"h.{b}.attn.c_proj.weight"]
-        b_attn_proj = params[f"h.{b}.attn.c_proj.bias"]
-        w_fc2 = params[f"h.{b}.ln_2.weight"][:, None] * params[f"h.{b}.mlp.c_fc.weight"]
-        b_fc2 = (
+        w_attn2 = params[f"h.{b}.attn.c_proj.weight"]
+        b_attn2 = params[f"h.{b}.attn.c_proj.bias"]
+        w_mlp1 = (
+            params[f"h.{b}.ln_2.weight"][:, None] * params[f"h.{b}.mlp.c_fc.weight"]
+        )
+        b_mlp1 = (
             params[f"h.{b}.ln_2.bias"] @ params[f"h.{b}.mlp.c_fc.weight"]
             + params[f"h.{b}.mlp.c_fc.bias"]
         )
-        w_proj = params[f"h.{b}.mlp.c_proj.weight"]
-        b_proj = params[f"h.{b}.mlp.c_proj.bias"]
+        w_mlp2 = params[f"h.{b}.mlp.c_proj.weight"]
+        b_mlp2 = params[f"h.{b}.mlp.c_proj.bias"]
 
-        qkv = standardise_rows(x) @ w_attn2 + b_attn2
-        out_heads = np.zeros((n_seq, n_embd), dtype=x.dtype)
+        qkv = standardise_rows(x) @ w_attn1 + b_attn1
+        attn = np.zeros((n_seq, n_embd), dtype=x.dtype)
         for i in range(n_head):
-            q = qkv[:, dk * i : dk * (i + 1)]
-            k = qkv[:, dk * (n_head + i) : dk * (n_head + i + 1)]
-            v = qkv[:, dk * (2 * n_head + i) : dk * (2 * n_head + i + 1)]
-            out_heads[:, dk * i : dk * (i + 1)] = (
-                normalise_rows(np.exp(q @ k.T / np.sqrt(dk)) * mask) @ v
+            q = qkv[:, D * i : D * (i + 1)]
+            k = qkv[:, D * (n_head + i) : D * (n_head + i + 1)]
+            v = qkv[:, D * (2 * n_head + i) : D * (2 * n_head + i + 1)]
+            attn[:, D * i : D * (i + 1)] = (
+                normalise_rows(np.exp(q @ k.T / np.sqrt(D)) * mask) @ v
             )
-        x += out_heads @ w_attn_proj + b_attn_proj
-        x += gelu(standardise_rows(x) @ w_fc2 + b_fc2) @ w_proj + b_proj
-    return (standardise_rows(x) * g_f + b_f) @ wte.T
+        x += attn @ w_attn2 + b_attn2
+        x += gelu(standardise_rows(x) @ w_mlp1 + b_mlp1) @ w_mlp2 + b_mlp2
+    return (standardise_rows(x) * w_ln + b_ln) @ wte.T
 
 
 def main(
