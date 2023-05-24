@@ -28,45 +28,40 @@ def standardise_rows(x):
 
 
 def gpt2(inputs):
-    n_seq = len(inputs)
     wte = params["wte"]
     wpe = params["wpe"]
-    x = wte[inputs] + wpe[range(len(inputs))]
-    mask = np.tri(n_seq, dtype=x.dtype)
-    for block in params["blocks"]:
-        w_fc = block["mlp"]["c_fc"]["w"]
-        b_fc = block["mlp"]["c_fc"]["b"]
-        w_proj = block["mlp"]["c_proj"]["w"]
-        b_proj = block["mlp"]["c_proj"]["b"]
-        g_1 = block["ln_1"]["g"]
-        b_1 = block["ln_1"]["b"]
-        g_2 = block["ln_2"]["g"]
-        b_2 = block["ln_2"]["b"]
-        w_attn = block["attn"]["c_attn"]["w"]
-        b_attn = block["attn"]["c_attn"]["b"]
-        w_attn_proj = block["attn"]["c_proj"]["w"]
-        b_attn_proj = block["attn"]["c_proj"]["b"]
-
-        w_attn2 = g_1[:, None] * w_attn
-        b_attn2 = b_1 @ w_attn + b_attn
-        w_fc2 = g_2[:, None] * w_fc
-        b_fc2 = b_2 @ w_fc + b_fc
-        z = np.sqrt(n_embd / n_head)
-
-        qkv = np.split(standardise_rows(x) @ w_attn2 + b_attn2, 3 * n_head, axis=-1)
-        out_heads = np.hstack(
-            [
-                normalise_rows(np.exp(q @ k.T / z) * mask) @ v
-                for q, k, v in zip(
-                    qkv[:n_head], qkv[n_head : 2 * n_head], qkv[2 * n_head :]
-                )
-            ]
-        )
-        x += out_heads @ w_attn_proj + b_attn_proj
-        x += gelu(standardise_rows(x) @ w_fc2 + b_fc2) @ w_proj + b_proj
-
     g_f = params["ln_f"]["g"]
     b_f = params["ln_f"]["b"]
+    dk = int(n_embd / n_head)
+    n_seq = len(inputs)
+    x = wte[inputs] + wpe[:n_seq]
+    mask = np.tri(n_seq, dtype=x.dtype)
+    for block in params["blocks"]:
+        w_attn2 = block["ln_1"]["g"][:, None] * block["attn"]["c_attn"]["w"]
+        b_attn2 = (
+            block["ln_1"]["b"] @ block["attn"]["c_attn"]["w"]
+            + block["attn"]["c_attn"]["b"]
+        )
+        w_attn_proj = block["attn"]["c_proj"]["w"]
+        b_attn_proj = block["attn"]["c_proj"]["b"]
+        w_fc2 = block["ln_2"]["g"][:, None] * block["mlp"]["c_fc"]["w"]
+        b_fc2 = (
+            block["ln_2"]["b"] @ block["mlp"]["c_fc"]["w"] + block["mlp"]["c_fc"]["b"]
+        )
+        w_proj = block["mlp"]["c_proj"]["w"]
+        b_proj = block["mlp"]["c_proj"]["b"]
+
+        qkv = standardise_rows(x) @ w_attn2 + b_attn2
+        out_heads = np.zeros((n_seq, n_embd), dtype=x.dtype)
+        for i in range(n_head):
+            q = qkv[:, dk * i : dk * (i + 1)]
+            k = qkv[:, dk * (n_head + i) : dk * (n_head + i + 1)]
+            v = qkv[:, dk * (2 * n_head + i) : dk * (2 * n_head + i + 1)]
+            out_heads[:, dk * i : dk * (i + 1)] = (
+                normalise_rows(np.exp(q @ k.T / np.sqrt(dk)) * mask) @ v
+            )
+        x += out_heads @ w_attn_proj + b_attn_proj
+        x += gelu(standardise_rows(x) @ w_fc2 + b_fc2) @ w_proj + b_proj
     return (standardise_rows(x) * g_f + b_f) @ wte.T
 
 
