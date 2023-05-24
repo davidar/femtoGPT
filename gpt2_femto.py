@@ -1,18 +1,30 @@
 #!/usr/bin/env python3
 
+import json
 import numpy as np
 import scipy.stats as stats
+import safetensors.numpy
 
-from utils import load_encoder_hparams_and_params
+from encoder import get_encoder
+
+# from huggingface_hub import hf_hub_download
+# hf_hub_download("gpt2", "config.json", local_dir="models/gpt2")
+# hf_hub_download("gpt2", "model.safetensors", local_dir="models/gpt2")
 
 model_size: str = "124M"
 models_dir: str = "models"
-encoder, hparams, params = load_encoder_hparams_and_params(model_size, models_dir)
-n_vocab = hparams["n_vocab"]
+encoder = get_encoder(model_size, models_dir)
+hparams = json.loads(open("models/gpt2/config.json").read())
+
+n_vocab = hparams["vocab_size"]
 n_ctx = hparams["n_ctx"]
 n_embd = hparams["n_embd"]
 n_head = hparams["n_head"]
 n_layer = hparams["n_layer"]
+
+params = safetensors.numpy.load_file("models/gpt2/model.safetensors")
+for k, v in params.items():
+    print(k, v.shape)
 
 
 def gelu(x):
@@ -28,28 +40,31 @@ def standardise_rows(x):
 
 
 def gpt2(inputs):
-    wte = params["wte"]
-    wpe = params["wpe"]
-    g_f = params["ln_f"]["g"]
-    b_f = params["ln_f"]["b"]
+    wte = params["wte.weight"]
+    wpe = params["wpe.weight"]
+    g_f = params["ln_f.weight"]
+    b_f = params["ln_f.bias"]
     dk = int(n_embd / n_head)
     n_seq = len(inputs)
     x = wte[inputs] + wpe[:n_seq]
     mask = np.tri(n_seq, dtype=x.dtype)
-    for block in params["blocks"]:
-        w_attn2 = block["ln_1"]["g"][:, None] * block["attn"]["c_attn"]["w"]
+    for b in range(n_layer):
+        w_attn2 = (
+            params[f"h.{b}.ln_1.weight"][:, None] * params[f"h.{b}.attn.c_attn.weight"]
+        )
         b_attn2 = (
-            block["ln_1"]["b"] @ block["attn"]["c_attn"]["w"]
-            + block["attn"]["c_attn"]["b"]
+            params[f"h.{b}.ln_1.bias"] @ params[f"h.{b}.attn.c_attn.weight"]
+            + params[f"h.{b}.attn.c_attn.bias"]
         )
-        w_attn_proj = block["attn"]["c_proj"]["w"]
-        b_attn_proj = block["attn"]["c_proj"]["b"]
-        w_fc2 = block["ln_2"]["g"][:, None] * block["mlp"]["c_fc"]["w"]
+        w_attn_proj = params[f"h.{b}.attn.c_proj.weight"]
+        b_attn_proj = params[f"h.{b}.attn.c_proj.bias"]
+        w_fc2 = params[f"h.{b}.ln_2.weight"][:, None] * params[f"h.{b}.mlp.c_fc.weight"]
         b_fc2 = (
-            block["ln_2"]["b"] @ block["mlp"]["c_fc"]["w"] + block["mlp"]["c_fc"]["b"]
+            params[f"h.{b}.ln_2.bias"] @ params[f"h.{b}.mlp.c_fc.weight"]
+            + params[f"h.{b}.mlp.c_fc.bias"]
         )
-        w_proj = block["mlp"]["c_proj"]["w"]
-        b_proj = block["mlp"]["c_proj"]["b"]
+        w_proj = params[f"h.{b}.mlp.c_proj.weight"]
+        b_proj = params[f"h.{b}.mlp.c_proj.bias"]
 
         qkv = standardise_rows(x) @ w_attn2 + b_attn2
         out_heads = np.zeros((n_seq, n_embd), dtype=x.dtype)
