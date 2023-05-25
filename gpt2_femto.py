@@ -32,8 +32,6 @@ wpe = params["wpe.weight"]
 w_ln = params["ln_f.weight"]
 b_ln = params["ln_f.bias"]
 
-qkv = [np.zeros((0, 3 * n_embd)) for _ in range(n_layer)]
-
 
 def standardise(x):
     x = np.copy(x)
@@ -42,43 +40,47 @@ def standardise(x):
     return x
 
 
-def gpt2(token, posn):
-    global qkv
-    x = wte[token] + wpe[posn]
-    for b in range(n_layer):
-        w_attn1 = (
-            params[f"h.{b}.ln_1.weight"][:, None] * params[f"h.{b}.attn.c_attn.weight"]
-        )
-        b_attn1 = (
-            params[f"h.{b}.ln_1.bias"] @ params[f"h.{b}.attn.c_attn.weight"]
-            + params[f"h.{b}.attn.c_attn.bias"]
-        )
-        w_attn2 = params[f"h.{b}.attn.c_proj.weight"]
-        b_attn2 = params[f"h.{b}.attn.c_proj.bias"]
-        w_mlp1 = (
-            params[f"h.{b}.ln_2.weight"][:, None] * params[f"h.{b}.mlp.c_fc.weight"]
-        )
-        b_mlp1 = (
-            params[f"h.{b}.ln_2.bias"] @ params[f"h.{b}.mlp.c_fc.weight"]
-            + params[f"h.{b}.mlp.c_fc.bias"]
-        )
-        w_mlp2 = params[f"h.{b}.mlp.c_proj.weight"]
-        b_mlp2 = params[f"h.{b}.mlp.c_proj.bias"]
+class TransformerBlock:
+    def __init__(self, b):
+        self.qkv = np.zeros((0, 3 * n_embd))
+        self.b_attn1 = params[f"h.{b}.attn.c_attn.bias"]
+        self.b_attn1 += params[f"h.{b}.ln_1.bias"] @ params[f"h.{b}.attn.c_attn.weight"]
+        self.w_attn1 = params[f"h.{b}.attn.c_attn.weight"]
+        self.w_attn1 *= params[f"h.{b}.ln_1.weight"][:, None]
+        self.b_attn2 = params[f"h.{b}.attn.c_proj.bias"]
+        self.w_attn2 = params[f"h.{b}.attn.c_proj.weight"]
+        self.b_mlp1 = params[f"h.{b}.mlp.c_fc.bias"]
+        self.b_mlp1 += params[f"h.{b}.ln_2.bias"] @ params[f"h.{b}.mlp.c_fc.weight"]
+        self.w_mlp1 = params[f"h.{b}.mlp.c_fc.weight"]
+        self.w_mlp1 *= params[f"h.{b}.ln_2.weight"][:, None]
+        self.b_mlp2 = params[f"h.{b}.mlp.c_proj.bias"]
+        self.w_mlp2 = params[f"h.{b}.mlp.c_proj.weight"]
 
-        qkv[b] = np.vstack([qkv[b], standardise(x) @ w_attn1 + b_attn1])
+    def __call__(self, x):
+        self.qkv = np.vstack([self.qkv, standardise(x) @ self.w_attn1 + self.b_attn1])
         attn = np.zeros(n_embd, dtype=x.dtype)
         for i in range(n_head):
-            q = qkv[b][-1, D * i : D * (i + 1)]
-            k = qkv[b][:, D * (n_head + i) : D * (n_head + i + 1)]
-            v = qkv[b][:, D * (2 * n_head + i) : D * (2 * n_head + i + 1)]
+            q = self.qkv[-1, D * i : D * (i + 1)]
+            k = self.qkv[:, D * (n_head + i) : D * (n_head + i + 1)]
+            v = self.qkv[:, D * (2 * n_head + i) : D * (2 * n_head + i + 1)]
             A = np.exp(q @ k.T / np.sqrt(D))
             A /= np.sum(A, axis=-1, keepdims=True)
             attn[D * i : D * (i + 1)] = A @ v
-        x += attn @ w_attn2 + b_attn2
-        h = standardise(x) @ w_mlp1 + b_mlp1
+        x += attn @ self.w_attn2 + self.b_attn2
+        h = standardise(x) @ self.w_mlp1 + self.b_mlp1
         # h *= scipy.stats.norm.cdf(h)  # gelu
         h *= (1 + erf(h / np.sqrt(2))) / 2
-        x += h @ w_mlp2 + b_mlp2
+        x += h @ self.w_mlp2 + self.b_mlp2
+        return x
+
+
+blocks = [TransformerBlock(b) for b in range(n_layer)]
+
+
+def gpt2(token, posn):
+    x = wte[token] + wpe[posn]
+    for block in blocks:
+        x = block(x)
     return (standardise(x) * w_ln + b_ln) @ wte.T
 
 
