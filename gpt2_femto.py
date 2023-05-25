@@ -34,9 +34,10 @@ b_ln = params["ln_f.bias"]
 
 
 def standardise(x):
+    # return (x - np.mean(x)) / np.std(x)
     x = np.copy(x)
     x -= np.mean(x)
-    x /= np.sqrt(np.mean(x**2))
+    x /= np.linalg.norm(x) / np.sqrt(n_embd)
     return x
 
 
@@ -64,7 +65,7 @@ class TransformerBlock:
             k = self.qkv[:, D * (n_head + i) : D * (n_head + i + 1)]
             v = self.qkv[:, D * (2 * n_head + i) : D * (2 * n_head + i + 1)]
             A = np.exp(q @ k.T / np.sqrt(D))
-            A /= np.sum(A, axis=-1, keepdims=True)
+            A /= np.sum(A)
             attn[D * i : D * (i + 1)] = A @ v
         x += attn @ self.w_attn2 + self.b_attn2
         h = standardise(x) @ self.w_mlp1 + self.b_mlp1
@@ -85,18 +86,18 @@ def gpt2(token, posn):
 
 
 def main(
-    prompt: str = "Alan",  # "Alan Turing theorized that computers would one day become",
+    prompt: str = "Alan Turing theorized that computers would one day become",
     n_tokens_to_generate: int = 40,
 ):
-    print(prompt, end="", flush=True)
-    input_ids = encoder.encode(prompt)
-    assert len(input_ids) == 1
-    assert len(input_ids) + n_tokens_to_generate < n_ctx
-    for i in range(n_tokens_to_generate):
-        logits = gpt2(input_ids[-1], i)
-        next_id = np.argmax(logits)
-        input_ids.append(int(next_id))
-        print(encoder.decode([next_id]), end="", flush=True)
+    tokens = encoder.encode(prompt)
+    print(encoder.decode([tokens[0]]), end="", flush=True)
+    total = len(tokens) + n_tokens_to_generate
+    assert total < n_ctx
+    for i in range(total):
+        logits = gpt2(tokens[i], i)
+        if i + 1 >= len(tokens):
+            tokens.append(int(np.argmax(logits)))
+        print(encoder.decode([tokens[i + 1]]), end="", flush=True)
 
 
 if __name__ == "__main__":
