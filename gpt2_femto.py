@@ -32,18 +32,19 @@ wpe = params["wpe.weight"]
 w_ln = params["ln_f.weight"]
 b_ln = params["ln_f.bias"]
 
+qkv = [np.zeros((0, 3 * n_embd)) for _ in range(n_layer)]
 
-def standardise_rows(x):
+
+def standardise(x):
     x = np.copy(x)
-    x -= np.mean(x, axis=-1, keepdims=True)
-    x /= np.sqrt(np.mean(x**2, axis=-1, keepdims=True))
+    x -= np.mean(x)
+    x /= np.sqrt(np.mean(x**2))
     return x
 
 
-def gpt2(inputs):
-    n_seq = len(inputs)
-    x = wte[inputs] + wpe[:n_seq]
-    mask = np.tri(n_seq, dtype=x.dtype)
+def gpt2(token, posn):
+    global qkv
+    x = wte[token] + wpe[posn]
     for b in range(n_layer):
         w_attn1 = (
             params[f"h.{b}.ln_1.weight"][:, None] * params[f"h.{b}.attn.c_attn.weight"]
@@ -64,33 +65,34 @@ def gpt2(inputs):
         w_mlp2 = params[f"h.{b}.mlp.c_proj.weight"]
         b_mlp2 = params[f"h.{b}.mlp.c_proj.bias"]
 
-        qkv = standardise_rows(x) @ w_attn1 + b_attn1
-        attn = np.zeros((n_seq, n_embd), dtype=x.dtype)
+        qkv[b] = np.vstack([qkv[b], standardise(x) @ w_attn1 + b_attn1])
+        attn = np.zeros(n_embd, dtype=x.dtype)
         for i in range(n_head):
-            q = qkv[:, D * i : D * (i + 1)]
-            k = qkv[:, D * (n_head + i) : D * (n_head + i + 1)]
-            v = qkv[:, D * (2 * n_head + i) : D * (2 * n_head + i + 1)]
-            A = np.exp(q @ k.T / np.sqrt(D)) * mask
+            q = qkv[b][-1, D * i : D * (i + 1)]
+            k = qkv[b][:, D * (n_head + i) : D * (n_head + i + 1)]
+            v = qkv[b][:, D * (2 * n_head + i) : D * (2 * n_head + i + 1)]
+            A = np.exp(q @ k.T / np.sqrt(D))
             A /= np.sum(A, axis=-1, keepdims=True)
-            attn[:, D * i : D * (i + 1)] = A @ v
+            attn[D * i : D * (i + 1)] = A @ v
         x += attn @ w_attn2 + b_attn2
-        h = standardise_rows(x) @ w_mlp1 + b_mlp1
+        h = standardise(x) @ w_mlp1 + b_mlp1
         # h *= scipy.stats.norm.cdf(h)  # gelu
         h *= (1 + erf(h / np.sqrt(2))) / 2
         x += h @ w_mlp2 + b_mlp2
-    return (standardise_rows(x) * w_ln + b_ln) @ wte.T
+    return (standardise(x) * w_ln + b_ln) @ wte.T
 
 
 def main(
-    prompt: str = "Alan Turing theorized that computers would one day become",
+    prompt: str = "Alan",  # "Alan Turing theorized that computers would one day become",
     n_tokens_to_generate: int = 40,
 ):
     print(prompt, end="", flush=True)
     input_ids = encoder.encode(prompt)
+    assert len(input_ids) == 1
     assert len(input_ids) + n_tokens_to_generate < n_ctx
-    for _ in range(n_tokens_to_generate):
-        logits = gpt2(input_ids)
-        next_id = np.argmax(logits[-1])
+    for i in range(n_tokens_to_generate):
+        logits = gpt2(input_ids[-1], i)
+        next_id = np.argmax(logits)
         input_ids.append(int(next_id))
         print(encoder.decode([next_id]), end="", flush=True)
 
