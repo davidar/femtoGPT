@@ -29,16 +29,12 @@ for k, v in params.items():
 
 wte = params["wte.weight"]
 wpe = params["wpe.weight"]
-w_ln = params["ln_f.weight"]
+w_ln = params["ln_f.weight"] * np.sqrt(n_embd)
 b_ln = params["ln_f.bias"]
 
 
-def standardise(x):
-    # return (x - np.mean(x)) / np.std(x)
-    x = np.copy(x)
-    x -= np.mean(x)
-    x /= np.linalg.norm(x) / np.sqrt(n_embd)
-    return x
+def normalise(x):
+    return x / np.linalg.norm(x)
 
 
 class TransformerBlock:
@@ -47,18 +43,20 @@ class TransformerBlock:
         self.b_attn1 = params[f"h.{b}.attn.c_attn.bias"]
         self.b_attn1 += params[f"h.{b}.ln_1.bias"] @ params[f"h.{b}.attn.c_attn.weight"]
         self.w_attn1 = params[f"h.{b}.attn.c_attn.weight"]
-        self.w_attn1 *= params[f"h.{b}.ln_1.weight"][:, None]
+        self.w_attn1 *= params[f"h.{b}.ln_1.weight"][:, None] * np.sqrt(n_embd)
         self.b_attn2 = params[f"h.{b}.attn.c_proj.bias"]
         self.w_attn2 = params[f"h.{b}.attn.c_proj.weight"]
         self.b_mlp1 = params[f"h.{b}.mlp.c_fc.bias"]
         self.b_mlp1 += params[f"h.{b}.ln_2.bias"] @ params[f"h.{b}.mlp.c_fc.weight"]
         self.w_mlp1 = params[f"h.{b}.mlp.c_fc.weight"]
-        self.w_mlp1 *= params[f"h.{b}.ln_2.weight"][:, None]
+        self.w_mlp1 *= params[f"h.{b}.ln_2.weight"][:, None] * np.sqrt(n_embd)
         self.b_mlp2 = params[f"h.{b}.mlp.c_proj.bias"]
         self.w_mlp2 = params[f"h.{b}.mlp.c_proj.weight"]
 
     def __call__(self, x):
-        self.qkv = np.vstack([self.qkv, standardise(x) @ self.w_attn1 + self.b_attn1])
+        self.qkv = np.vstack(
+            [self.qkv, normalise(x - np.mean(x)) @ self.w_attn1 + self.b_attn1]
+        )
         attn = np.zeros(n_embd, dtype=x.dtype)
         for i in range(n_head):
             q = self.qkv[-1, D * i : D * (i + 1)]
@@ -68,21 +66,11 @@ class TransformerBlock:
             A /= np.sum(A)
             attn[D * i : D * (i + 1)] = A @ v
         x += attn @ self.w_attn2 + self.b_attn2
-        h = standardise(x) @ self.w_mlp1 + self.b_mlp1
+        h = normalise(x - np.mean(x)) @ self.w_mlp1 + self.b_mlp1
         # h *= scipy.stats.norm.cdf(h)  # gelu
         h *= (1 + erf(h / np.sqrt(2))) / 2
         x += h @ self.w_mlp2 + self.b_mlp2
         return x
-
-
-blocks = [TransformerBlock(b) for b in range(n_layer)]
-
-
-def gpt2(token, posn):
-    x = wte[token] + wpe[posn]
-    for block in blocks:
-        x = block(x)
-    return (standardise(x) * w_ln + b_ln) @ wte.T
 
 
 def main(
@@ -93,11 +81,17 @@ def main(
     print(encoder.decode([tokens[0]]), end="", flush=True)
     total = len(tokens) + n_tokens_to_generate
     assert total < n_ctx
-    for i in range(total):
-        logits = gpt2(tokens[i], i)
-        if i + 1 >= len(tokens):
+    blocks = [TransformerBlock(b) for b in range(n_layer)]
+    for posn in range(total):
+        token = tokens[posn]
+        x = wte[token] + wpe[posn]
+        for block in blocks:
+            x = block(x)
+        final = normalise(x - np.mean(x)) * w_ln + b_ln
+        logits = final @ wte.T
+        if posn + 1 >= len(tokens):
             tokens.append(int(np.argmax(logits)))
-        print(encoder.decode([tokens[i + 1]]), end="", flush=True)
+        print(encoder.decode([tokens[posn + 1]]), end="", flush=True)
 
 
 if __name__ == "__main__":
