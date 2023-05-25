@@ -2,7 +2,7 @@
 
 import json
 import numpy as np
-import scipy.stats as stats
+from scipy.special import erf
 import safetensors.numpy
 
 from encoder import get_encoder
@@ -33,16 +33,11 @@ w_ln = params["ln_f.weight"]
 b_ln = params["ln_f.bias"]
 
 
-def gelu(x):
-    return x * stats.norm.cdf(x)
-
-
-def normalise_rows(x):
-    return x / np.sum(x, axis=-1, keepdims=True)
-
-
 def standardise_rows(x):
-    return (x - np.mean(x, axis=-1, keepdims=True)) / np.std(x, axis=-1, keepdims=True)
+    x = np.copy(x)
+    x -= np.mean(x, axis=-1, keepdims=True)
+    x /= np.sqrt(np.mean(x**2, axis=-1, keepdims=True))
+    return x
 
 
 def gpt2(inputs):
@@ -75,11 +70,14 @@ def gpt2(inputs):
             q = qkv[:, D * i : D * (i + 1)]
             k = qkv[:, D * (n_head + i) : D * (n_head + i + 1)]
             v = qkv[:, D * (2 * n_head + i) : D * (2 * n_head + i + 1)]
-            attn[:, D * i : D * (i + 1)] = (
-                normalise_rows(np.exp(q @ k.T / np.sqrt(D)) * mask) @ v
-            )
+            A = np.exp(q @ k.T / np.sqrt(D)) * mask
+            A /= np.sum(A, axis=-1, keepdims=True)
+            attn[:, D * i : D * (i + 1)] = A @ v
         x += attn @ w_attn2 + b_attn2
-        x += gelu(standardise_rows(x) @ w_mlp1 + b_mlp1) @ w_mlp2 + b_mlp2
+        h = standardise_rows(x) @ w_mlp1 + b_mlp1
+        # h *= scipy.stats.norm.cdf(h)  # gelu
+        h *= (1 + erf(h / np.sqrt(2))) / 2
+        x += h @ w_mlp2 + b_mlp2
     return (standardise_rows(x) * w_ln + b_ln) @ wte.T
 
 
