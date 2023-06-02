@@ -11,9 +11,7 @@ from encoder import get_encoder
 # hf_hub_download("gpt2", "config.json", local_dir="models/gpt2")
 # hf_hub_download("gpt2", "model.safetensors", local_dir="models/gpt2")
 
-model_size: str = "124M"
-models_dir: str = "models"
-encoder = get_encoder(model_size, models_dir)
+encoder = get_encoder('', '')
 hparams = json.loads(open("models/gpt2/config.json").read())
 
 n_vocab = hparams["vocab_size"]
