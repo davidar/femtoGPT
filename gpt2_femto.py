@@ -32,6 +32,11 @@ wpe = params["wpe.weight"]
 w_ln = params["ln_f.weight"] * np.sqrt(n_embd)
 b_ln = params["ln_f.bias"]
 
+w_unembed = wte.T.copy()
+w_unembed -= w_unembed.mean(axis=1, keepdims=True)
+
+wte -= wte.mean(axis=1, keepdims=True)
+wpe -= wpe.mean(axis=1, keepdims=True)
 
 # prompt: str = "If today is Wednesday, tomorrow is",
 prompt = "When Mary and John went to the store, John gave a drink to"
@@ -55,22 +60,26 @@ def cosine_similarity(x, y):
 class TransformerBlock:
     def __init__(self, b):
         self.qkv = np.zeros((0, 3 * n_embd))
-        self.b_attn1 = params[f"h.{b}.attn.c_attn.bias"]
-        self.b_attn1 += params[f"h.{b}.ln_1.bias"] @ params[f"h.{b}.attn.c_attn.weight"]
-        self.w_attn1 = params[f"h.{b}.attn.c_attn.weight"]
-        self.w_attn1 *= params[f"h.{b}.ln_1.weight"][:, None] * np.sqrt(n_embd)
-        self.b_attn2 = params[f"h.{b}.attn.c_proj.bias"]
-        self.w_attn2 = params[f"h.{b}.attn.c_proj.weight"]
+        self.b_qkv = params[f"h.{b}.attn.c_attn.bias"]
+        self.b_qkv += params[f"h.{b}.ln_1.bias"] @ params[f"h.{b}.attn.c_attn.weight"]
+        self.w_qkv = params[f"h.{b}.attn.c_attn.weight"]
+        self.w_qkv *= params[f"h.{b}.ln_1.weight"][:, None] * np.sqrt(n_embd)
+        self.b_out = params[f"h.{b}.attn.c_proj.bias"]
+        self.b_out -= self.b_out.mean(keepdims=True)
+        self.w_out = params[f"h.{b}.attn.c_proj.weight"]
+        self.w_out -= self.w_out.mean(axis=1, keepdims=True)
         self.b_mlp1 = params[f"h.{b}.mlp.c_fc.bias"]
         self.b_mlp1 += params[f"h.{b}.ln_2.bias"] @ params[f"h.{b}.mlp.c_fc.weight"]
         self.w_mlp1 = params[f"h.{b}.mlp.c_fc.weight"]
         self.w_mlp1 *= params[f"h.{b}.ln_2.weight"][:, None] * np.sqrt(n_embd)
         self.b_mlp2 = params[f"h.{b}.mlp.c_proj.bias"]
+        self.b_mlp2 -= self.b_mlp2.mean(keepdims=True)
         self.w_mlp2 = params[f"h.{b}.mlp.c_proj.weight"]
+        self.w_mlp2 -= self.w_mlp2.mean(axis=1, keepdims=True)
 
     def __call__(self, layer, x):
         self.qkv = np.vstack(
-            [self.qkv, normalise(x - np.mean(x)) @ self.w_attn1 + self.b_attn1]
+            [self.qkv, normalise(x) @ self.w_qkv + self.b_qkv]
         )
         # print(self.qkv.shape)
         next_posn = self.qkv.shape[0]
@@ -78,8 +87,8 @@ class TransformerBlock:
         end_posn = (analyse and next_posn == len(prompt_tokens) and layer >= 7)
         token0 = None
         if end_posn:
-            final = normalise(x - np.mean(x)) * w_ln + b_ln
-            logits = final @ wte.T
+            final = normalise(x) * w_ln + b_ln
+            logits = final @ w_unembed
             token0 = int(np.argmax(logits))
             print(encoder.decode([token0]))
         v73_dotprod_baseline = 0
@@ -88,7 +97,7 @@ class TransformerBlock:
         q96_dotprod_baseline = 0
         q99_dotprod_baseline = 0
         if s2_posn:
-            qkv7_head = normalise(x - np.mean(x)) @ blocks[7].w_attn1 + blocks[7].b_attn1
+            qkv7_head = normalise(x) @ blocks[7].w_qkv + blocks[7].b_qkv
             v73_head = qkv7_head[D * (2 * n_head + 3) : D * (2 * n_head + 3 + 1)]
             v79_head = qkv7_head[D * (2 * n_head + 9) : D * (2 * n_head + 9 + 1)]
             v73_dotprod_baseline = cosine_similarity(v73_head, v_store[len(prompt_tokens) - 4, 7, 3])
@@ -96,12 +105,12 @@ class TransformerBlock:
             # if layer < 7:
             print('v73_dotprod_baseline', v73_dotprod_baseline)
             print('v79_dotprod_baseline', v79_dotprod_baseline)
-            qkv8_head = normalise(x - np.mean(x)) @ blocks[8].w_attn1 + blocks[8].b_attn1
+            qkv8_head = normalise(x) @ blocks[8].w_qkv + blocks[8].b_qkv
             v86_head = qkv8_head[D * (2 * n_head + 6) : D * (2 * n_head + 6 + 1)]
             v86_dotprod_baseline = cosine_similarity(v86_head, v_store[len(prompt_tokens) - 4, 8, 6])
             print('v86_dotprod_baseline', v86_dotprod_baseline)
         if end_posn:
-            qkv9_head = normalise(x - np.mean(x)) @ blocks[9].w_attn1 + blocks[9].b_attn1
+            qkv9_head = normalise(x) @ blocks[9].w_qkv + blocks[9].b_qkv
             q96_head = qkv9_head[D * 6 : D * (6 + 1)]
             q99_head = qkv9_head[D * 9 : D * (9 + 1)]
             q96_dotprod_baseline = cosine_similarity(q96_head, q_store[len(prompt_tokens), 9, 6])
@@ -132,8 +141,8 @@ class TransformerBlock:
                 if s2_posn: print()
             if s2_posn:
                 x_head = x.copy()
-                x_head += (A @ v) @ self.w_attn2[D * i : D * (i + 1), :] + self.b_attn2
-                qkv7_head = normalise(x_head - np.mean(x_head)) @ blocks[7].w_attn1 + blocks[7].b_attn1
+                x_head += (A @ v) @ self.w_out[D * i : D * (i + 1), :] + self.b_out
+                qkv7_head = normalise(x_head - np.mean(x_head)) @ blocks[7].w_qkv + blocks[7].b_qkv
                 v73_head = qkv7_head[D * (2 * n_head + 3) : D * (2 * n_head + 3 + 1)]
                 v79_head = qkv7_head[D * (2 * n_head + 9) : D * (2 * n_head + 9 + 1)]
                 v73_dotprod = cosine_similarity(v73_head, v_store[len(prompt_tokens) - 4, 7, 3])
@@ -143,7 +152,7 @@ class TransformerBlock:
                 if layer < 7:
                     if v73_dotprod_diff > 0.02: print('v73_dotprod_diff', v73_dotprod_diff)
                     if v79_dotprod_diff > 0.02: print('v79_dotprod_diff', v79_dotprod_diff)
-                qkv8_head = normalise(x_head - np.mean(x_head)) @ blocks[8].w_attn1 + blocks[8].b_attn1
+                qkv8_head = normalise(x_head - np.mean(x_head)) @ blocks[8].w_qkv + blocks[8].b_qkv
                 v86_head = qkv8_head[D * (2 * n_head + 6) : D * (2 * n_head + 6 + 1)]
                 v86_dotprod = cosine_similarity(v86_head, v_store[len(prompt_tokens) - 4, 8, 6])
                 v86_dotprod_diff = v86_dotprod - v86_dotprod_baseline
@@ -151,14 +160,14 @@ class TransformerBlock:
                     if v86_dotprod_diff > 0.02: print('v86_dotprod_diff', v86_dotprod_diff)
             if end_posn:
                 x_head = x.copy()
-                x_head += (A @ v) @ self.w_attn2[D * i : D * (i + 1), :] + self.b_attn2
+                x_head += (A @ v) @ self.w_out[D * i : D * (i + 1), :] + self.b_out
                 # name movers
                 final = normalise(x_head - np.mean(x_head)) * w_ln + b_ln
-                logits = final @ wte.T
+                logits = final @ w_unembed
                 token = int(np.argmax(logits))
                 print(encoder.decode([token]), colour = None if token == token0 else 'green')
                 # s-inhibition
-                qkv9_head = normalise(x_head - np.mean(x_head)) @ blocks[9].w_attn1 + blocks[9].b_attn1
+                qkv9_head = normalise(x_head - np.mean(x_head)) @ blocks[9].w_qkv + blocks[9].b_qkv
                 q96_head = qkv9_head[D * 6 : D * (6 + 1)]
                 q99_head = qkv9_head[D * 9 : D * (9 + 1)]
                 q96_dotprod = cosine_similarity(q96_head, q_store[len(prompt_tokens), 9, 6])
@@ -169,13 +178,14 @@ class TransformerBlock:
                     if q96_dotprod > 0.01: print('q96_dotprod', q96_dotprod)
                     if q99_dotprod > 0.01: print('q99_dotprod', q99_dotprod)
             attn[D * i : D * (i + 1)] = A @ v
-        x += attn @ self.w_attn2 + self.b_attn2
-        h = normalise(x - np.mean(x)) @ self.w_mlp1 + self.b_mlp1
+        x += attn @ self.w_out + self.b_out
+        h = normalise(x) @ self.w_mlp1 + self.b_mlp1
         # h *= scipy.stats.norm.cdf(h)  # gelu
         h *= (1 + erf(h / np.sqrt(2))) / 2
         x += h @ self.w_mlp2 + self.b_mlp2
         if end_posn or s2_posn:
             print('---')
+        assert(x.mean() < 1e-6)
         return x
 
 
@@ -194,8 +204,8 @@ def main():
             # if posn + 1 >= len(tokens):
             #     print('layer', layer, end=" ", flush=True)
             x = block(layer, x)
-        final = normalise(x - np.mean(x)) * w_ln + b_ln
-        logits = final @ wte.T
+        final = normalise(x) * w_ln + b_ln
+        logits = final @ w_unembed
         token = int(np.argmax(logits))
 
         temp = 0.7
