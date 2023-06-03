@@ -31,9 +31,9 @@ wpe = params["wpe.weight"]
 w_ln = params["ln_f.weight"] * np.sqrt(n_embd)
 b_ln = params["ln_f.bias"]
 
+# centering
 w_unembed = wte.T.copy()
 w_unembed -= w_unembed.mean(axis=1, keepdims=True)
-
 wte -= wte.mean(axis=1, keepdims=True)
 wpe -= wpe.mean(axis=1, keepdims=True)
 
@@ -124,9 +124,7 @@ def main():
             tokens.append(token)
             # for token, prob in zip(top_k, top_k_probs):
             #     print(encoder.decode([token]), prob, end="; ", flush=True)
-            # break
         print(encoder.decode([tokens[posn + 1]]), end="", flush=True)
-    print()
 
 
 if __name__ == "__main__":
