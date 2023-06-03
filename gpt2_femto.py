@@ -41,6 +41,7 @@ n_tokens_to_generate: int = 400
 blocks = []
 
 q_store = {}
+v_store = {}
 
 analyse = False
 
@@ -73,7 +74,7 @@ class TransformerBlock:
         )
         # print(self.qkv.shape)
         next_posn = self.qkv.shape[0]
-        s2_posn = (analyse and next_posn == len(prompt_tokens) - 4 and layer <= 6)
+        s2_posn = (analyse and next_posn == len(prompt_tokens) - 4 and layer <= 7)
         end_posn = (analyse and next_posn == len(prompt_tokens) and layer >= 7)
         token0 = None
         if end_posn:
@@ -81,8 +82,24 @@ class TransformerBlock:
             logits = final @ wte.T
             token0 = int(np.argmax(logits))
             print(encoder.decode([token0]))
+        v73_dotprod_baseline = 0
+        v79_dotprod_baseline = 0
+        v86_dotprod_baseline = 0
         q96_dotprod_baseline = 0
         q99_dotprod_baseline = 0
+        if s2_posn:
+            qkv7_head = normalise(x - np.mean(x)) @ blocks[7].w_attn1 + blocks[7].b_attn1
+            v73_head = qkv7_head[D * (2 * n_head + 3) : D * (2 * n_head + 3 + 1)]
+            v79_head = qkv7_head[D * (2 * n_head + 9) : D * (2 * n_head + 9 + 1)]
+            v73_dotprod_baseline = cosine_similarity(v73_head, v_store[len(prompt_tokens) - 4, 7, 3])
+            v79_dotprod_baseline = cosine_similarity(v79_head, v_store[len(prompt_tokens) - 4, 7, 9])
+            # if layer < 7:
+            print('v73_dotprod_baseline', v73_dotprod_baseline)
+            print('v79_dotprod_baseline', v79_dotprod_baseline)
+            qkv8_head = normalise(x - np.mean(x)) @ blocks[8].w_attn1 + blocks[8].b_attn1
+            v86_head = qkv8_head[D * (2 * n_head + 6) : D * (2 * n_head + 6 + 1)]
+            v86_dotprod_baseline = cosine_similarity(v86_head, v_store[len(prompt_tokens) - 4, 8, 6])
+            print('v86_dotprod_baseline', v86_dotprod_baseline)
         if end_posn:
             qkv9_head = normalise(x - np.mean(x)) @ blocks[9].w_attn1 + blocks[9].b_attn1
             q96_head = qkv9_head[D * 6 : D * (6 + 1)]
@@ -99,6 +116,7 @@ class TransformerBlock:
             v = self.qkv[:, D * (2 * n_head + i) : D * (2 * n_head + i + 1)]
             # if end_posn and layer == 9 and i == 6: print(repr(q))
             q_store[next_posn, layer, i] = q
+            v_store[next_posn, layer, i] = v[-1]
             A = np.exp(q @ k.T / np.sqrt(D))
             A /= np.sum(A)
             A[A < 0.04] = 0
@@ -112,6 +130,25 @@ class TransformerBlock:
                     else:
                         print(encoder.decode([token]), end="", flush=True)
                 if s2_posn: print()
+            if s2_posn:
+                x_head = x.copy()
+                x_head += (A @ v) @ self.w_attn2[D * i : D * (i + 1), :] + self.b_attn2
+                qkv7_head = normalise(x_head - np.mean(x_head)) @ blocks[7].w_attn1 + blocks[7].b_attn1
+                v73_head = qkv7_head[D * (2 * n_head + 3) : D * (2 * n_head + 3 + 1)]
+                v79_head = qkv7_head[D * (2 * n_head + 9) : D * (2 * n_head + 9 + 1)]
+                v73_dotprod = cosine_similarity(v73_head, v_store[len(prompt_tokens) - 4, 7, 3])
+                v79_dotprod = cosine_similarity(v79_head, v_store[len(prompt_tokens) - 4, 7, 9])
+                v73_dotprod_diff = v73_dotprod - v73_dotprod_baseline
+                v79_dotprod_diff = v79_dotprod - v79_dotprod_baseline
+                if layer < 7:
+                    if v73_dotprod_diff > 0.02: print('v73_dotprod_diff', v73_dotprod_diff)
+                    if v79_dotprod_diff > 0.02: print('v79_dotprod_diff', v79_dotprod_diff)
+                qkv8_head = normalise(x_head - np.mean(x_head)) @ blocks[8].w_attn1 + blocks[8].b_attn1
+                v86_head = qkv8_head[D * (2 * n_head + 6) : D * (2 * n_head + 6 + 1)]
+                v86_dotprod = cosine_similarity(v86_head, v_store[len(prompt_tokens) - 4, 8, 6])
+                v86_dotprod_diff = v86_dotprod - v86_dotprod_baseline
+                if layer < 8:
+                    if v86_dotprod_diff > 0.02: print('v86_dotprod_diff', v86_dotprod_diff)
             if end_posn:
                 x_head = x.copy()
                 x_head += (A @ v) @ self.w_attn2[D * i : D * (i + 1), :] + self.b_attn2
