@@ -67,7 +67,7 @@ class TransformerBlock:
         self.w_mlp2 = params[f"h.{b}.mlp.c_proj.weight"]
         self.w_mlp2 -= self.w_mlp2.mean(axis=1, keepdims=True)
 
-    def __call__(self, x):
+    def __call__(self, x, layer, head_activations):
         self.qkv = np.vstack([self.qkv, normalise(x) @ self.w_qkv + self.b_qkv])
         attn = []
         for i in range(n_head):
@@ -78,7 +78,10 @@ class TransformerBlock:
             A /= np.sum(A)
             # A[A < 0.04] = 0
             # A /= np.sum(A)
-            attn.append(A @ v)
+            if layer > 2:
+                attn.append((A @ v) * head_activations[layer, i])
+            else:
+                attn.append(A @ v)
         x += np.hstack(attn) @ self.w_out + self.b_out
         h = normalise(x) @ self.w_mlp1 + self.b_mlp1
         # h *= scipy.stats.norm.cdf(h)  # gelu
@@ -91,27 +94,29 @@ class TransformerBlock:
 blocks = [TransformerBlock(b) for b in range(n_layer)]
 
 
-def gpt2(x):
-    for block in blocks:
-        x = block(x)
+def gpt2(x, head_activations):
+    for layer, block in enumerate(blocks):
+        x = block(x, layer, head_activations)
     final = normalise(x) * w_ln + b_ln
     logits = final @ w_unembed
     return logits
 
 
-def main():
-    # prompt_tokens = [50256] + encoder.encode("When Mary and John went to the store, John gave a drink to")
-    prompt_tokens = encoder.encode(
-        "Alan Turing theorized that computers would one day become"
+def main(head_activations):
+    prompt_tokens = [50256] + encoder.encode(
+        "When Mary and John went to the store, John gave a drink to"
     )
+    # prompt_tokens = encoder.encode(
+    #     "Alan Turing theorized that computers would one day become"
+    # )
     tokens = prompt_tokens[:]
-    print(encoder.decode([tokens[0]]), end="", flush=True)
+    # print(encoder.decode([tokens[0]]), end="", flush=True)
     total = len(tokens) + 40
     assert total < n_ctx
     for posn in range(total):
         token = tokens[posn]
         x = wte[token] + wpe[posn]
-        logits = gpt2(x)
+        logits = gpt2(x, head_activations)
         token = int(np.argmax(logits))
 
         temp = 0.7
@@ -128,11 +133,20 @@ def main():
 
         if posn + 1 >= len(tokens):
             tokens.append(token)
-            # for token, prob in zip(top_k, top_k_probs):
-            #     print(encoder.decode([token]), prob, end="; ", flush=True)
-        print(encoder.decode([tokens[posn + 1]]), end="", flush=True)
+            for token, prob in zip(top_k, top_k_probs):
+                print(encoder.decode([int(token)]), prob, end="; ", flush=True)
+            print()
+            return top_k_probs[0]
+        # print(encoder.decode([tokens[posn + 1]]), end="", flush=True)
 
 
 if __name__ == "__main__":
-    main()
-    # for block in blocks: block.qkv = np.zeros((0, 3 * n_embd))
+    head_grad = jax.grad(main)(np.ones((n_layer, n_head)))
+    print(head_grad)
+    head_enable = (abs(head_grad) > 0.0075).astype(np.float32)
+    print(repr(head_enable))
+
+    for block in blocks:
+        block.qkv = np.zeros((0, 3 * n_embd))
+
+    main(head_enable)
