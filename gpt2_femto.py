@@ -41,8 +41,8 @@ wpe -= wpe.mean(axis=1, keepdims=True)
 force_enable_layers = 4
 
 
-def normalise(x):
-    return x / np.linalg.norm(x)
+def normalise_rows(x):
+    return x / np.linalg.norm(x, axis=1, keepdims=True)
 
 
 def cosine_similarity(x, y):
@@ -51,7 +51,6 @@ def cosine_similarity(x, y):
 
 class TransformerBlock:
     def __init__(self, b):
-        self.qkv = np.zeros((0, 3 * n_embd))
         self.b_qkv = params[f"h.{b}.attn.c_attn.bias"]
         self.b_qkv += params[f"h.{b}.ln_1.bias"] @ params[f"h.{b}.attn.c_attn.weight"]
         self.w_qkv = params[f"h.{b}.attn.c_attn.weight"]
@@ -69,23 +68,24 @@ class TransformerBlock:
         self.w_mlp2 = params[f"h.{b}.mlp.c_proj.weight"]
         self.w_mlp2 -= self.w_mlp2.mean(axis=1, keepdims=True)
 
-    def __call__(self, x, posn, layer, head_activations):
-        self.qkv = np.vstack([self.qkv, normalise(x) @ self.w_qkv + self.b_qkv])
+    def __call__(self, x, layer, head_activations):
+        mask = np.tri(n_seq, dtype=x.dtype)
+        qkv = normalise_rows(x) @ self.w_qkv + self.b_qkv
         attn = []
         for i in range(n_head):
-            q = self.qkv[-1, D * i : D * (i + 1)]
-            k = self.qkv[:, D * (n_head + i) : D * (n_head + i + 1)]
-            v = self.qkv[:, D * (2 * n_head + i) : D * (2 * n_head + i + 1)]
-            A = np.exp(q @ k.T / np.sqrt(D))
-            A /= np.sum(A)
+            q = qkv[:, D * i : D * (i + 1)]
+            k = qkv[:, D * (n_head + i) : D * (n_head + i + 1)]
+            v = qkv[:, D * (2 * n_head + i) : D * (2 * n_head + i + 1)]
+            A = np.exp(q @ k.T / np.sqrt(D)) * mask
+            A /= np.sum(A, axis=1, keepdims=True)
             # A[A < 0.04] = 0
             # A /= np.sum(A)
             if layer < force_enable_layers:
                 attn.append(A @ v)
             else:
-                attn.append((A @ v) * head_activations[posn, layer, i])
+                attn.append((A @ v) * head_activations[:, layer, i].reshape(n_seq, 1))
         x += np.hstack(attn) @ self.w_out + self.b_out
-        h = normalise(x) @ self.w_mlp1 + self.b_mlp1
+        h = normalise_rows(x) @ self.w_mlp1 + self.b_mlp1
         # h *= scipy.stats.norm.cdf(h)  # gelu
         h *= (1 + erf(h / np.sqrt(2))) / 2
         x += h @ self.w_mlp2 + self.b_mlp2
@@ -96,10 +96,11 @@ class TransformerBlock:
 blocks = [TransformerBlock(b) for b in range(n_layer)]
 
 
-def gpt2(x, posn, head_activations):
+def gpt2(inputs, head_activations):
+    x = wte[inputs] + wpe[:n_seq]
     for layer, block in enumerate(blocks):
-        x = block(x, posn, layer, head_activations)
-    final = normalise(x) * w_ln + b_ln
+        x = block(x, layer, head_activations)
+    final = normalise_rows(x) * w_ln + b_ln
     logits = final @ w_unembed
     return logits
 
@@ -109,17 +110,17 @@ prompt_tokens = [50256] + encoder.encode(
     # "Alan Turing theorized that computers would one day become"
 )
 
+n_seq = len(prompt_tokens)
+
 
 def main(head_activations):
     tokens = prompt_tokens[:]
     # print(encoder.decode([tokens[0]]), end="", flush=True)
     total = len(tokens) + 40
     assert total < n_ctx
-    for posn in range(total):
-        token = tokens[posn]
-        x = wte[token] + wpe[posn]
-        logits = gpt2(x, posn, head_activations)
-        token = int(np.argmax(logits))
+    if True:
+        logits = gpt2(prompt_tokens, head_activations)[-1]
+        # token = int(np.argmax(logits))
 
         temp = 0.7
         exp_logits = np.exp((logits - np.max(logits)) / temp)
@@ -133,8 +134,8 @@ def main(head_activations):
         top_k_probs /= np.sum(top_k_probs)
         # token = np.random.choice(top_k, p=top_k_probs)
 
-        if posn + 1 >= len(tokens):
-            tokens.append(token)
+        if True:
+            # tokens.append(token)
             for token, prob in zip(top_k, top_k_probs):
                 print(encoder.decode([int(token)]), prob, end="; ", flush=True)
             print()
@@ -143,15 +144,12 @@ def main(head_activations):
 
 
 if __name__ == "__main__":
-    head_grad = jax.grad(main)(np.ones((20, n_layer, n_head)))
+    head_grad = jax.grad(main)(np.ones((n_seq, n_layer, n_head)))
     print(head_grad)
     head_enable = (abs(head_grad) > 0.01).astype(np.float32)
     print(repr(head_enable))
     num_enabled = head_enable.sum()
     total = len(prompt_tokens) * (n_layer - force_enable_layers) * n_head
     print(f"{100 * num_enabled / total:.1f}% of heads enabled")
-
-    for block in blocks:
-        block.qkv = np.zeros((0, 3 * n_embd))
 
     main(head_enable)
