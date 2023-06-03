@@ -14,6 +14,8 @@ from encoder import get_encoder
 # hf_hub_download("gpt2", "config.json", local_dir="models/gpt2")
 # hf_hub_download("gpt2", "model.safetensors", local_dir="models/gpt2")
 
+jax.experimental.compilation_cache.compilation_cache.initialize_cache("jax_cache")
+
 encoder = get_encoder("", "")
 hparams = json.loads(open("models/gpt2/config.json").read())
 
@@ -113,43 +115,34 @@ prompt_tokens = [50256] + encoder.encode(
 n_seq = len(prompt_tokens)
 
 
-def main(head_activations):
-    tokens = prompt_tokens[:]
-    # print(encoder.decode([tokens[0]]), end="", flush=True)
-    total = len(tokens) + 40
-    assert total < n_ctx
-    if True:
-        logits = gpt2(prompt_tokens, head_activations)[-1]
-        # token = int(np.argmax(logits))
-
-        temp = 0.7
-        exp_logits = np.exp((logits - np.max(logits)) / temp)
-        probs = exp_logits / np.sum(exp_logits)
-
-        # top k sampling
-        k = 5
-        top_k = list(np.argsort(probs)[-k:])
-        top_k.reverse()
-        top_k_probs = probs[np.array(top_k)]
-        top_k_probs /= np.sum(top_k_probs)
-        # token = np.random.choice(top_k, p=top_k_probs)
-
-        if True:
-            # tokens.append(token)
-            for token, prob in zip(top_k, top_k_probs):
-                print(encoder.decode([int(token)]), prob, end="; ", flush=True)
-            print()
-            return logits[encoder.encode("Mary")[0]] - logits[encoder.encode("John")[0]]
-        # print(encoder.decode([tokens[posn + 1]]), end="", flush=True)
+@jax.grad
+def grad_logit_diff(head_activations):
+    logits = gpt2(prompt_tokens, head_activations)[-1]
+    return logits[encoder.encode("Mary")[0]] - logits[encoder.encode("John")[0]]
 
 
 if __name__ == "__main__":
-    head_grad = jax.grad(main)(np.ones((n_seq, n_layer, n_head)))
-    print(head_grad)
+    head_grad = grad_logit_diff(np.ones((n_seq, n_layer, n_head)))
+    # print(head_grad)
     head_enable = (abs(head_grad) > 0.01).astype(np.float32)
-    print(repr(head_enable))
+    # print(repr(head_enable))
     num_enabled = head_enable.sum()
     total = len(prompt_tokens) * (n_layer - force_enable_layers) * n_head
     print(f"{100 * num_enabled / total:.1f}% of heads enabled")
 
-    main(head_enable)
+    logits = gpt2(prompt_tokens, head_enable)[-1]
+
+    temp = 0.7
+    exp_logits = np.exp((logits - np.max(logits)) / temp)
+    probs = exp_logits / np.sum(exp_logits)
+
+    # top k sampling
+    k = 5
+    top_k = np.argsort(probs)[-1 : -k - 1 : -1]
+    top_k_probs = probs[top_k]
+    top_k_probs /= np.sum(top_k_probs)
+    # token = np.random.choice(top_k, p=top_k_probs)
+
+    for token, prob in zip(top_k, top_k_probs):
+        print(encoder.decode([int(token)]), prob, end="; ", flush=True)
+    print()
