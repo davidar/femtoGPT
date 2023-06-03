@@ -78,7 +78,7 @@ class TransformerBlock:
             A /= np.sum(A)
             # A[A < 0.04] = 0
             # A /= np.sum(A)
-            if layer > 2:
+            if layer > 0:
                 attn.append((A @ v) * head_activations[layer, i])
             else:
                 attn.append(A @ v)
@@ -136,15 +136,17 @@ def main(head_activations):
             for token, prob in zip(top_k, top_k_probs):
                 print(encoder.decode([int(token)]), prob, end="; ", flush=True)
             print()
-            return top_k_probs[0]
+            return logits[encoder.encode("Mary")[0]] - logits[encoder.encode("John")[0]]
         # print(encoder.decode([tokens[posn + 1]]), end="", flush=True)
 
 
 if __name__ == "__main__":
     head_grad = jax.grad(main)(np.ones((n_layer, n_head)))
     print(head_grad)
-    head_enable = (abs(head_grad) > 0.0075).astype(np.float32)
+    head_enable = (abs(head_grad) > 0.1).astype(np.float32)
     print(repr(head_enable))
+    num_enabled = head_enable.sum()
+    print(f"{100 * num_enabled / ((n_layer - 1) * n_head):.1f}% of heads enabled")
 
     for block in blocks:
         block.qkv = np.zeros((0, 3 * n_embd))
