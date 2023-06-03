@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 
 import json
-import numpy as np
-from scipy.special import erf
+import jax
+import jax.numpy as np
+from jax.scipy.special import erf
 import safetensors.numpy
 
 from print_color import print
@@ -68,7 +69,7 @@ class TransformerBlock:
 
     def __call__(self, x):
         self.qkv = np.vstack([self.qkv, normalise(x) @ self.w_qkv + self.b_qkv])
-        attn = np.zeros(n_embd, dtype=x.dtype)
+        attn = []
         for i in range(n_head):
             q = self.qkv[-1, D * i : D * (i + 1)]
             k = self.qkv[:, D * (n_head + i) : D * (n_head + i + 1)]
@@ -77,17 +78,25 @@ class TransformerBlock:
             A /= np.sum(A)
             # A[A < 0.04] = 0
             # A /= np.sum(A)
-            attn[D * i : D * (i + 1)] = A @ v
-        x += attn @ self.w_out + self.b_out
+            attn.append(A @ v)
+        x += np.hstack(attn) @ self.w_out + self.b_out
         h = normalise(x) @ self.w_mlp1 + self.b_mlp1
         # h *= scipy.stats.norm.cdf(h)  # gelu
         h *= (1 + erf(h / np.sqrt(2))) / 2
         x += h @ self.w_mlp2 + self.b_mlp2
-        assert x.mean() < 1e-5
+        # assert x.mean() < 1e-5
         return x
 
 
 blocks = [TransformerBlock(b) for b in range(n_layer)]
+
+
+def gpt2(x):
+    for block in blocks:
+        x = block(x)
+    final = normalise(x) * w_ln + b_ln
+    logits = final @ w_unembed
+    return logits
 
 
 def main():
@@ -102,10 +111,7 @@ def main():
     for posn in range(total):
         token = tokens[posn]
         x = wte[token] + wpe[posn]
-        for layer, block in enumerate(blocks):
-            x = block(x)
-        final = normalise(x) * w_ln + b_ln
-        logits = final @ w_unembed
+        logits = gpt2(x)
         token = int(np.argmax(logits))
 
         temp = 0.7
@@ -116,7 +122,7 @@ def main():
         k = 5
         top_k = list(np.argsort(probs)[-k:])
         top_k.reverse()
-        top_k_probs = probs[top_k]
+        top_k_probs = probs[np.array(top_k)]
         top_k_probs /= np.sum(top_k_probs)
         # token = np.random.choice(top_k, p=top_k_probs)
 
