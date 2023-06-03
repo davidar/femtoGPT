@@ -115,34 +115,50 @@ prompt_tokens = [50256] + encoder.encode(
 n_seq = len(prompt_tokens)
 
 
+def softmax(x):
+    exp_x = np.exp(x - np.max(x))
+    return exp_x / np.sum(exp_x)
+
+
+def kl_divergence(p, q):
+    return np.sum(p * np.log(p / q))
+
+
 @jax.grad
-def grad_logit_diff(head_activations):
+def grad_objective(head_activations, probs_ref):
     logits = gpt2(prompt_tokens, head_activations)[-1]
-    return logits[encoder.encode("Mary")[0]] - logits[encoder.encode("John")[0]]
+    probs = softmax(logits)
+    return kl_divergence(probs_ref, probs) + 0.1 * np.sum(head_activations)
 
 
 if __name__ == "__main__":
-    head_grad = grad_logit_diff(np.ones((n_seq, n_layer, n_head)))
-    # print(head_grad)
-    head_enable = (abs(head_grad) > 0.01).astype(np.float32)
-    # print(repr(head_enable))
-    num_enabled = head_enable.sum()
-    total = len(prompt_tokens) * (n_layer - force_enable_layers) * n_head
-    print(f"{100 * num_enabled / total:.1f}% of heads enabled")
+    probs_ref = softmax(gpt2(prompt_tokens, np.ones((n_seq, n_layer, n_head)))[-1])
 
-    logits = gpt2(prompt_tokens, head_enable)[-1]
+    head_activations = np.ones((n_seq, n_layer, n_head))
+    while True:
+        head_grad = grad_objective(head_activations, probs_ref)
+        head_activations -= 0.1 * head_grad
+        head_activations = np.clip(head_activations, 0, 1)
+        # print(head_grad)
+        # head_enable = (head_activations > 0.01).astype(np.float32)
+        # print(repr(head_enable))
+        num_enabled = head_activations[force_enable_layers:].sum()
+        total = len(prompt_tokens) * (n_layer - force_enable_layers) * n_head
+        print(f"{100 * num_enabled / total:.1f}% of heads enabled")
 
-    temp = 0.7
-    exp_logits = np.exp((logits - np.max(logits)) / temp)
-    probs = exp_logits / np.sum(exp_logits)
+        logits = gpt2(prompt_tokens, head_activations)[-1]
 
-    # top k sampling
-    k = 5
-    top_k = np.argsort(probs)[-1 : -k - 1 : -1]
-    top_k_probs = probs[top_k]
-    top_k_probs /= np.sum(top_k_probs)
-    # token = np.random.choice(top_k, p=top_k_probs)
+        temp = 1
+        exp_logits = np.exp((logits - np.max(logits)) / temp)
+        probs = exp_logits / np.sum(exp_logits)
 
-    for token, prob in zip(top_k, top_k_probs):
-        print(encoder.decode([int(token)]), prob, end="; ", flush=True)
-    print()
+        # top k sampling
+        k = 5
+        top_k = np.argsort(probs)[-1 : -k - 1 : -1]
+        top_k_probs = probs[top_k]
+        top_k_probs /= np.sum(top_k_probs)
+        # token = np.random.choice(top_k, p=top_k_probs)
+
+        for token, prob in zip(top_k, top_k_probs):
+            print(encoder.decode([int(token)]), prob, end="; ", flush=True)
+        print()
