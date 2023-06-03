@@ -177,7 +177,18 @@ class TransformerBlock:
                 if layer < 9:
                     if q96_dotprod > 0.01: print('q96_dotprod', q96_dotprod)
                     if q99_dotprod > 0.01: print('q99_dotprod', q99_dotprod)
-            attn[D * i : D * (i + 1)] = A @ v
+            # if s2_posn and layer == 5 and i not in [5, 8, 9]:
+            #     pass
+            # if s2_posn and layer == 6 and i not in [3, 9]:
+            #     pass
+            if end_posn and layer == 7 and i not in [3, 9]:
+                pass
+            elif end_posn and layer == 8 and i not in [6, 10]:
+                pass
+            # elif end_posn and layer == 9 and i not in [6, 9]:
+            #     pass
+            else:
+                attn[D * i : D * (i + 1)] = A @ v
         x += attn @ self.w_out + self.b_out
         h = normalise(x) @ self.w_mlp1 + self.b_mlp1
         # h *= scipy.stats.norm.cdf(h)  # gelu
