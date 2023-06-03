@@ -38,6 +38,8 @@ w_unembed -= w_unembed.mean(axis=1, keepdims=True)
 wte -= wte.mean(axis=1, keepdims=True)
 wpe -= wpe.mean(axis=1, keepdims=True)
 
+force_enable_layers = 4
+
 
 def normalise(x):
     return x / np.linalg.norm(x)
@@ -78,7 +80,7 @@ class TransformerBlock:
             A /= np.sum(A)
             # A[A < 0.04] = 0
             # A /= np.sum(A)
-            if layer < 4:
+            if layer < force_enable_layers:
                 attn.append(A @ v)
             else:
                 attn.append((A @ v) * head_activations[posn, layer, i])
@@ -146,7 +148,8 @@ if __name__ == "__main__":
     head_enable = (abs(head_grad) > 0.01).astype(np.float32)
     print(repr(head_enable))
     num_enabled = head_enable.sum()
-    print(f"{100 * num_enabled / (len(prompt_tokens) * (n_layer - 4) * n_head):.1f}% of heads enabled")
+    total = len(prompt_tokens) * (n_layer - force_enable_layers) * n_head
+    print(f"{100 * num_enabled / total:.1f}% of heads enabled")
 
     for block in blocks:
         block.qkv = np.zeros((0, 3 * n_embd))
