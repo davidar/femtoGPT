@@ -27,7 +27,8 @@ n_layer = hparams["n_layer"]
 D = int(n_embd / n_head)
 
 params = safetensors.numpy.load_file("models/gpt2/model.safetensors")
-# for k, v in params.items(): print(k, v.shape)
+for k, v in params.items():
+    params[k] = np.array(v)
 
 wte = params["wte.weight"]
 wpe = params["wpe.weight"]
@@ -98,6 +99,7 @@ class TransformerBlock:
 blocks = [TransformerBlock(b) for b in range(n_layer)]
 
 
+@jax.jit
 def gpt2(inputs, head_activations):
     x = wte[inputs] + wpe[:n_seq]
     for layer, block in enumerate(blocks):
@@ -111,6 +113,7 @@ prompt_tokens = [50256] + encoder.encode(
     "When Mary and John went to the store, John gave a drink to"
     # "Alan Turing theorized that computers would one day become"
 )
+prompt_tokens = np.array(prompt_tokens, dtype=np.int32)
 
 n_seq = len(prompt_tokens)
 
