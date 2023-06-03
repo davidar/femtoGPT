@@ -131,29 +131,35 @@ def kl_divergence(p, q):
 def grad_objective(head_activations, probs_ref):
     logits = gpt2(prompt_tokens, head_activations)[-1]
     probs = softmax(logits)
-    return kl_divergence(probs_ref, probs) + 0.1 * np.sum(head_activations)
+    return kl_divergence(probs_ref, probs) + 10 * np.sum(head_activations) / head_activations.size
 
 
 if __name__ == "__main__":
     probs_ref = softmax(gpt2(prompt_tokens, np.ones((n_seq, n_layer, n_head)))[-1])
 
     head_activations = np.ones((n_seq, n_layer, n_head))
-    while True:
+    for i in range(250):
+        print(f"Step {i}", end="; ")
         head_grad = grad_objective(head_activations, probs_ref)
-        head_activations -= 0.1 * head_grad
+        head_activations -= 5 * (1 - i / 250) * head_grad
         head_activations = np.clip(head_activations, 0, 1)
         # print(head_grad)
         # head_enable = (head_activations > 0.01).astype(np.float32)
         # print(repr(head_enable))
         num_enabled = head_activations[force_enable_layers:].sum()
-        total = len(prompt_tokens) * (n_layer - force_enable_layers) * n_head
-        print(f"{100 * num_enabled / total:.1f}% of heads enabled")
+        total = head_activations.size - force_enable_layers * n_head
+        print(f"{100 * num_enabled / total:.1f}% total activation", end="; ")
 
-        logits = gpt2(prompt_tokens, head_activations)[-1]
+        head_enable = (head_activations > 0.1).astype(np.float32)
+        num_enabled = head_enable[force_enable_layers:].sum()
+        print(f"{100 * num_enabled / total:.1f}% of heads enabled", end="; ")
+        logits = gpt2(prompt_tokens, head_enable)[-1]
 
         temp = 1
         exp_logits = np.exp((logits - np.max(logits)) / temp)
         probs = exp_logits / np.sum(exp_logits)
+
+        print(f"KL divergence: {kl_divergence(probs_ref, probs)}")
 
         # top k sampling
         k = 5
@@ -164,4 +170,11 @@ if __name__ == "__main__":
 
         for token, prob in zip(top_k, top_k_probs):
             print(encoder.decode([int(token)]), prob, end="; ", flush=True)
+        print()
+    for i in range(n_seq):
+        print(encoder.decode([int(prompt_tokens[i])]), end=" ")
+        for j in range(n_layer):
+            for k in range(n_head):
+                if head_activations[i, j, k] > 0.1:
+                    print(f"{j}.{k}", end=" ")
         print()
