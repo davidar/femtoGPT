@@ -46,6 +46,15 @@ wpe -= wpe.mean(axis=1, keepdims=True)
 
 force_enable_layers = 4
 
+prompt_tokens = [50256] + encoder.encode(
+    "When Mary and John went to the store, John gave a drink to"
+    # "Alan Turing theorized that computers would one day become"
+)
+prompt_tokens = np.array(prompt_tokens, dtype=np.int32)
+
+n_seq = len(prompt_tokens)
+causal_mask = np.tri(n_seq, dtype=np.float32)
+
 
 def normalise_rows(x):
     return x / np.linalg.norm(x, axis=1, keepdims=True)
@@ -75,29 +84,30 @@ class TransformerBlock:
         self.w_mlp2 = params[f"h.{b}.mlp.c_proj.weight"]
         self.w_mlp2 -= self.w_mlp2.mean(axis=1, keepdims=True)
 
+    def attention(self, q, k, v, h):
+        A = np.exp(q @ k.T / np.sqrt(D)) * causal_mask
+        A /= np.sum(A, axis=1, keepdims=True)
+        # A[A < 0.04] = 0
+        # A /= np.sum(A)
+        if self.layer < force_enable_layers:
+            return A @ v
+        else:
+            return (A @ v) * h
+
     @functools.partial(jax.jit, static_argnames=["self"])
     def __call__(self, x, head_activations):
-        mask = np.tri(n_seq, dtype=x.dtype)
         qkv = normalise_rows(x) @ self.w_qkv + self.b_qkv
-        attn = []
-        for i in range(n_head):
-            q = qkv[:, D * i : D * (i + 1)]
-            k = qkv[:, D * (n_head + i) : D * (n_head + i + 1)]
-            v = qkv[:, D * (2 * n_head + i) : D * (2 * n_head + i + 1)]
-            A = np.exp(q @ k.T / np.sqrt(D)) * mask
-            A /= np.sum(A, axis=1, keepdims=True)
-            # A[A < 0.04] = 0
-            # A /= np.sum(A)
-            if self.layer < force_enable_layers:
-                attn.append(A @ v)
-            else:
-                attn.append((A @ v) * head_activations[:, self.layer, i].reshape(n_seq, 1))
-        x += np.hstack(attn) @ self.w_out + self.b_out
+        Q, K, V = np.split(qkv, 3, axis=1)
+        qs = np.split(Q, n_head, axis=1)
+        ks = np.split(K, n_head, axis=1)
+        vs = np.split(V, n_head, axis=1)
+        hs = np.split(head_activations[:, self.layer, :], n_head, axis=1)
+        attn = np.hstack([self.attention(*args) for args in zip(qs, ks, vs, hs)])
+        x += attn @ self.w_out + self.b_out
         h = normalise_rows(x) @ self.w_mlp1 + self.b_mlp1
         # h *= scipy.stats.norm.cdf(h)  # gelu
         h *= (1 + erf(h / np.sqrt(2))) / 2
         x += h @ self.w_mlp2 + self.b_mlp2
-        # assert x.mean() < 1e-5
         return x
 
 
@@ -108,18 +118,10 @@ def gpt2(inputs, head_activations):
     x = wte[inputs] + wpe[:n_seq]
     for block in blocks:
         x = block(x, head_activations)
+        assert x.mean() < 1e-5
     final = normalise_rows(x) * w_ln + b_ln
     logits = final @ w_unembed
     return logits
-
-
-prompt_tokens = [50256] + encoder.encode(
-    "When Mary and John went to the store, John gave a drink to"
-    # "Alan Turing theorized that computers would one day become"
-)
-prompt_tokens = np.array(prompt_tokens, dtype=np.int32)
-
-n_seq = len(prompt_tokens)
 
 
 def softmax(x):
