@@ -9,6 +9,7 @@ huggingface_hub==0.14.1
 safetensors==0.3.1
 
 print-color==0.4.6
+tqdm==4.65.0
 
 -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 jax[cuda12_pip]==0.4.11

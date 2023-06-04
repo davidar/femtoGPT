@@ -6,6 +6,7 @@ import jax
 import jax.numpy as np
 from jax.scipy.special import erf
 import safetensors.numpy
+from tqdm import tqdm
 
 from print_color import print
 
@@ -15,7 +16,7 @@ from encoder import get_encoder
 # hf_hub_download("gpt2", "config.json", local_dir="models/gpt2")
 # hf_hub_download("gpt2", "model.safetensors", local_dir="models/gpt2")
 
-jax.config.update("jax_log_compiles", True)
+# jax.config.update("jax_log_compiles", True)
 
 jax.experimental.compilation_cache.compilation_cache.initialize_cache("jax_cache")
 
@@ -86,25 +87,25 @@ class TransformerBlock:
         self.w_mlp2 = params[f"h.{b}.mlp.c_proj.weight"]
         self.w_mlp2 -= self.w_mlp2.mean(axis=1, keepdims=True)
 
-    def attention(self, q, k, v, h):
+    def attention(self, threshold, q, k, v, h):
         A = np.exp(q @ k.T / np.sqrt(D)) * causal_mask
         A /= np.sum(A, axis=1, keepdims=True)
-        # A *= A > 0.04
-        # A /= np.sum(A, axis=1, keepdims=True)
+        A *= A > threshold
+        A /= np.sum(A, axis=1, keepdims=True)
         if self.layer < force_enable_layers:
             return A @ v
         else:
             return (A @ v) * h
 
     @functools.partial(jax.jit, static_argnames=["self"])
-    def __call__(self, x, head_activations):
+    def __call__(self, x, head_activations, threshold):
         qkv = normalise_rows(x) @ self.w_qkv + self.b_qkv
         Q, K, V = np.split(qkv, 3, axis=1)
         qs = np.split(Q, n_head, axis=1)
         ks = np.split(K, n_head, axis=1)
         vs = np.split(V, n_head, axis=1)
         hs = np.split(head_activations[:, self.layer, :], n_head, axis=1)
-        attn = np.hstack([self.attention(*args) for args in zip(qs, ks, vs, hs)])
+        attn = np.hstack([self.attention(threshold, *args) for args in zip(qs, ks, vs, hs)])
         x += attn @ self.w_out + self.b_out
         h = normalise_rows(x) @ self.w_mlp1 + self.b_mlp1
         # h *= scipy.stats.norm.cdf(h)  # gelu
@@ -115,11 +116,13 @@ class TransformerBlock:
 
 blocks = [TransformerBlock(b) for b in range(n_layer)]
 
+warmup = True
 
-def gpt2(inputs, head_activations):
-    x = wte[inputs] + wpe[:n_seq]
-    for block in blocks:
-        x = block(x, head_activations)
+
+def gpt2(head_activations, threshold):
+    x = wte[prompt_tokens] + wpe[:n_seq]
+    for block in (tqdm(blocks) if warmup else blocks):
+        x = block(x, head_activations, threshold)
         assert x.mean() < 1e-5
     final = normalise_rows(x) * w_ln + b_ln
     logits = final @ w_unembed
@@ -139,15 +142,14 @@ def kl_divergence(p, q):
 
 @jax.grad
 def grad_objective(head_activations, probs_ref):
-    logits = gpt2(prompt_tokens, head_activations)[-1]
+    logits = gpt2(head_activations, 0)[-1]
     probs = softmax(logits)
     return kl_divergence(probs_ref, probs) + 10 * np.sum(head_activations) / head_activations.size
 
 
 if __name__ == "__main__":
-    probs_ref = softmax(gpt2(prompt_tokens, np.ones((n_seq, n_layer, n_head)))[-1])
-
-    head_activations = np.ones((n_seq, n_layer, n_head))
+    head_activations = np.ones((n_seq, n_layer, n_head), dtype=np.float32)
+    probs_ref = softmax(gpt2(head_activations, 0)[-1])
     for i in range(250):
         print(f"Step {i}", end="; ")
         head_grad = grad_objective(head_activations, probs_ref)
@@ -164,7 +166,7 @@ if __name__ == "__main__":
         num_enabled = head_enable[force_enable_layers:].sum()
         print(f"{100 * num_enabled / total:.1f}% of heads enabled", end="; ")
 
-        probs = softmax(gpt2(prompt_tokens, head_enable)[-1])
+        probs = softmax(gpt2(head_enable, 0.04)[-1])
         print(f"KL divergence: {kl_divergence(probs_ref, probs)}")
 
         # top k sampling
@@ -177,6 +179,9 @@ if __name__ == "__main__":
         for token, prob in zip(top_k, top_k_probs):
             print(f"'{encoder.decode([int(token)])}' {100 * prob:.1f}%", end="; ", flush=True)
         print()
+
+        warmup = False
+
     for i in range(n_seq):
         print(encoder.decode([int(prompt_tokens[i])]), end=" ")
         for j in range(n_layer):
