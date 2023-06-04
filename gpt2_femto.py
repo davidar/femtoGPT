@@ -71,6 +71,20 @@ def cosine_similarity(x, y):
     return np.dot(x, y) / (np.linalg.norm(x) * np.linalg.norm(y))
 
 
+def print_top_k(probs, k):
+    top_k = np.argsort(probs)[-1 : -k - 1 : -1]
+    top_k_probs = probs[top_k]
+    top_k_probs /= np.sum(top_k_probs)
+
+    for token, prob in zip(top_k, top_k_probs):
+        print(
+            f"'{encoder.decode([int(token)])}' {100 * prob:.1f}%",
+            end="; ",
+            flush=True,
+        )
+    print()
+
+
 class TransformerBlock:
     def __init__(self, b):
         self.layer = b
@@ -97,8 +111,13 @@ class TransformerBlock:
         A *= A > threshold
         A /= np.sum(A, axis=1, keepdims=True)
 
-        if analyse and (self.layer, i) in analyse_heads:
-            print(f"{self.layer}.{i}", end=": ", flush=True)
+        if analyse and ((self.layer, i) in analyse_heads or analyse_posn == n_seq - 1):
+            print(
+                f"{self.layer}.{i}",
+                end=": ",
+                flush=True,
+                format="bold" if (self.layer, i) in analyse_heads else None,
+            )
             for token, amt in zip(
                 prompt_tokens[1 : analyse_posn + 1],
                 A[analyse_posn, 1 : analyse_posn + 1],
@@ -121,13 +140,10 @@ class TransformerBlock:
             # logit lens just for the output of this head
             x_head = self.x_copy
             x_head += (A @ v) @ self.w_out[D * i : D * (i + 1), :] + self.b_out
-            final = normalise_rows(x_head) * w_ln + b_ln
-            logits = final @ w_unembed
-            token = int(np.argmax(logits[analyse_posn]))
-            print(
-                encoder.decode([token]),
-                format=None if token == int(self.token0[analyse_posn]) else "bold",
-            )
+            logits = (normalise_rows(x_head) * w_ln + b_ln) @ w_unembed
+            probs = softmax(logits[analyse_posn])
+            print("| ", end="", flush=True)
+            print_top_k(probs, 5)
 
         if self.layer < force_enable_layers:
             return A @ v
@@ -137,10 +153,6 @@ class TransformerBlock:
     @functools.partial(jax.jit, static_argnames=["self"])
     def __call__(self, x, head_activations, threshold):
         if analyse:
-            # logit lens
-            final = normalise_rows(x) * w_ln + b_ln
-            logits = final @ w_unembed
-            self.token0 = np.argmax(logits, axis=1)
             self.x_copy = x.copy()
 
         qkv = normalise_rows(x) @ self.w_qkv + self.b_qkv
@@ -156,10 +168,25 @@ class TransformerBlock:
             ]
         )
         x += attn @ self.w_out + self.b_out
+
+        if analyse and analyse_posn == n_seq - 1:
+            # logit lens
+            logits = (normalise_rows(x) * w_ln + b_ln) @ w_unembed
+            probs = softmax(logits[analyse_posn])
+            print(f"Layer {self.layer} prediction midway: ", end="", flush=True)
+            print_top_k(probs, 5)
+
         h = normalise_rows(x) @ self.w_mlp1 + self.b_mlp1
         # h *= scipy.stats.norm.cdf(h)  # gelu
         h *= (1 + erf(h / np.sqrt(2))) / 2
         x += h @ self.w_mlp2 + self.b_mlp2
+
+        if analyse and analyse_posn == n_seq - 1:
+            # logit lens
+            logits = (normalise_rows(x) * w_ln + b_ln) @ w_unembed
+            probs = softmax(logits[analyse_posn])
+            print(f"Layer {self.layer} prediction updated to: ", end="", flush=True)
+            print_top_k(probs, 5)
         return x
 
 
@@ -220,21 +247,7 @@ if __name__ == "__main__":
 
         probs = softmax(gpt2(head_enable, 0.04)[-1])
         print(f"KL divergence: {kl_divergence(probs_ref, probs)}")
-
-        # top k sampling
-        k = 5
-        top_k = np.argsort(probs)[-1 : -k - 1 : -1]
-        top_k_probs = probs[top_k]
-        top_k_probs /= np.sum(top_k_probs)
-        # token = np.random.choice(top_k, p=top_k_probs)
-
-        for token, prob in zip(top_k, top_k_probs):
-            print(
-                f"'{encoder.decode([int(token)])}' {100 * prob:.1f}%",
-                end="; ",
-                flush=True,
-            )
-        print()
+        print_top_k(probs, 5)
 
         warmup = False
 
@@ -251,4 +264,5 @@ if __name__ == "__main__":
                     print(f"{j}.{k}", end=" ")
                     analyse_heads.append((j, k))
         print()
-        gpt2(head_activations, 0.04)
+        if len(analyse_heads) > 0:
+            gpt2(head_enable, 0.04)
