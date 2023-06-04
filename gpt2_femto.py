@@ -15,7 +15,7 @@ from encoder import get_encoder
 # hf_hub_download("gpt2", "config.json", local_dir="models/gpt2")
 # hf_hub_download("gpt2", "model.safetensors", local_dir="models/gpt2")
 
-# jax.config.update("jax_log_compiles", True)
+jax.config.update("jax_log_compiles", True)
 
 jax.experimental.compilation_cache.compilation_cache.initialize_cache("jax_cache")
 
@@ -55,6 +55,8 @@ prompt_tokens = np.array(prompt_tokens, dtype=np.int32)
 n_seq = len(prompt_tokens)
 causal_mask = np.tri(n_seq, dtype=np.float32)
 
+# important_tokens = np.array(encoder.encode(" Mary them John the her"))
+
 
 def normalise_rows(x):
     return x / np.linalg.norm(x, axis=1, keepdims=True)
@@ -87,8 +89,8 @@ class TransformerBlock:
     def attention(self, q, k, v, h):
         A = np.exp(q @ k.T / np.sqrt(D)) * causal_mask
         A /= np.sum(A, axis=1, keepdims=True)
-        # A[A < 0.04] = 0
-        # A /= np.sum(A)
+        # A *= A > 0.04
+        # A /= np.sum(A, axis=1, keepdims=True)
         if self.layer < force_enable_layers:
             return A @ v
         else:
@@ -130,6 +132,8 @@ def softmax(x):
 
 
 def kl_divergence(p, q):
+    # p = p[important_tokens]
+    # q = q[important_tokens]
     return np.sum(p * np.log(p / q))
 
 
@@ -159,12 +163,8 @@ if __name__ == "__main__":
         head_enable = (head_activations > 0.1).astype(np.float32)
         num_enabled = head_enable[force_enable_layers:].sum()
         print(f"{100 * num_enabled / total:.1f}% of heads enabled", end="; ")
-        logits = gpt2(prompt_tokens, head_enable)[-1]
 
-        temp = 1
-        exp_logits = np.exp((logits - np.max(logits)) / temp)
-        probs = exp_logits / np.sum(exp_logits)
-
+        probs = softmax(gpt2(prompt_tokens, head_enable)[-1])
         print(f"KL divergence: {kl_divergence(probs_ref, probs)}")
 
         # top k sampling
