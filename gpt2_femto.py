@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import functools
 import json
 import jax
 import jax.numpy as np
@@ -13,6 +14,8 @@ from encoder import get_encoder
 # from huggingface_hub import hf_hub_download
 # hf_hub_download("gpt2", "config.json", local_dir="models/gpt2")
 # hf_hub_download("gpt2", "model.safetensors", local_dir="models/gpt2")
+
+# jax.config.update("jax_log_compiles", True)
 
 jax.experimental.compilation_cache.compilation_cache.initialize_cache("jax_cache")
 
@@ -54,6 +57,7 @@ def cosine_similarity(x, y):
 
 class TransformerBlock:
     def __init__(self, b):
+        self.layer = b
         self.b_qkv = params[f"h.{b}.attn.c_attn.bias"]
         self.b_qkv += params[f"h.{b}.ln_1.bias"] @ params[f"h.{b}.attn.c_attn.weight"]
         self.w_qkv = params[f"h.{b}.attn.c_attn.weight"]
@@ -71,7 +75,8 @@ class TransformerBlock:
         self.w_mlp2 = params[f"h.{b}.mlp.c_proj.weight"]
         self.w_mlp2 -= self.w_mlp2.mean(axis=1, keepdims=True)
 
-    def __call__(self, x, layer, head_activations):
+    @functools.partial(jax.jit, static_argnames=["self"])
+    def __call__(self, x, head_activations):
         mask = np.tri(n_seq, dtype=x.dtype)
         qkv = normalise_rows(x) @ self.w_qkv + self.b_qkv
         attn = []
@@ -83,10 +88,10 @@ class TransformerBlock:
             A /= np.sum(A, axis=1, keepdims=True)
             # A[A < 0.04] = 0
             # A /= np.sum(A)
-            if layer < force_enable_layers:
+            if self.layer < force_enable_layers:
                 attn.append(A @ v)
             else:
-                attn.append((A @ v) * head_activations[:, layer, i].reshape(n_seq, 1))
+                attn.append((A @ v) * head_activations[:, self.layer, i].reshape(n_seq, 1))
         x += np.hstack(attn) @ self.w_out + self.b_out
         h = normalise_rows(x) @ self.w_mlp1 + self.b_mlp1
         # h *= scipy.stats.norm.cdf(h)  # gelu
@@ -99,11 +104,10 @@ class TransformerBlock:
 blocks = [TransformerBlock(b) for b in range(n_layer)]
 
 
-@jax.jit
 def gpt2(inputs, head_activations):
     x = wte[inputs] + wpe[:n_seq]
-    for layer, block in enumerate(blocks):
-        x = block(x, layer, head_activations)
+    for block in blocks:
+        x = block(x, head_activations)
     final = normalise_rows(x) * w_ln + b_ln
     logits = final @ w_unembed
     return logits
@@ -169,7 +173,7 @@ if __name__ == "__main__":
         # token = np.random.choice(top_k, p=top_k_probs)
 
         for token, prob in zip(top_k, top_k_probs):
-            print(encoder.decode([int(token)]), prob, end="; ", flush=True)
+            print(f"'{encoder.decode([int(token)])}' {100 * prob:.1f}%", end="; ", flush=True)
         print()
     for i in range(n_seq):
         print(encoder.decode([int(prompt_tokens[i])]), end=" ")
