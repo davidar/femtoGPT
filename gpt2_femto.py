@@ -58,6 +58,10 @@ causal_mask = np.tri(n_seq, dtype=np.float32)
 
 # important_tokens = np.array(encoder.encode(" Mary them John the her"))
 
+analyse = False
+analyse_posn = 0
+analyse_heads = []
+
 
 def normalise_rows(x):
     return x / np.linalg.norm(x, axis=1, keepdims=True)
@@ -87,11 +91,44 @@ class TransformerBlock:
         self.w_mlp2 = params[f"h.{b}.mlp.c_proj.weight"]
         self.w_mlp2 -= self.w_mlp2.mean(axis=1, keepdims=True)
 
-    def attention(self, threshold, q, k, v, h):
+    def attention(self, threshold, i, q, k, v, h):
         A = np.exp(q @ k.T / np.sqrt(D)) * causal_mask
         A /= np.sum(A, axis=1, keepdims=True)
         A *= A > threshold
         A /= np.sum(A, axis=1, keepdims=True)
+
+        if analyse and (self.layer, i) in analyse_heads:
+            print(f"{self.layer}.{i}", end=": ", flush=True)
+            for token, amt in zip(
+                prompt_tokens[1 : analyse_posn + 1],
+                A[analyse_posn, 1 : analyse_posn + 1],
+            ):
+                token = int(token)
+                if amt > 0:
+                    print(
+                        encoder.decode([token]),
+                        end="",
+                        flush=True,
+                        colour="green"
+                        if amt > 0.5
+                        else "yellow"
+                        if amt > 0.1
+                        else "red",
+                    )
+                else:
+                    print(encoder.decode([token]), end="", flush=True)
+
+            # logit lens just for the output of this head
+            x_head = self.x_copy
+            x_head += (A @ v) @ self.w_out[D * i : D * (i + 1), :] + self.b_out
+            final = normalise_rows(x_head) * w_ln + b_ln
+            logits = final @ w_unembed
+            token = int(np.argmax(logits[analyse_posn]))
+            print(
+                encoder.decode([token]),
+                format=None if token == int(self.token0[analyse_posn]) else "bold",
+            )
+
         if self.layer < force_enable_layers:
             return A @ v
         else:
@@ -99,13 +136,25 @@ class TransformerBlock:
 
     @functools.partial(jax.jit, static_argnames=["self"])
     def __call__(self, x, head_activations, threshold):
+        if analyse:
+            # logit lens
+            final = normalise_rows(x) * w_ln + b_ln
+            logits = final @ w_unembed
+            self.token0 = np.argmax(logits, axis=1)
+            self.x_copy = x.copy()
+
         qkv = normalise_rows(x) @ self.w_qkv + self.b_qkv
         Q, K, V = np.split(qkv, 3, axis=1)
         qs = np.split(Q, n_head, axis=1)
         ks = np.split(K, n_head, axis=1)
         vs = np.split(V, n_head, axis=1)
         hs = np.split(head_activations[:, self.layer, :], n_head, axis=1)
-        attn = np.hstack([self.attention(threshold, *args) for args in zip(qs, ks, vs, hs)])
+        attn = np.hstack(
+            [
+                self.attention(threshold, i, *args)
+                for i, args in enumerate(zip(qs, ks, vs, hs))
+            ]
+        )
         x += attn @ self.w_out + self.b_out
         h = normalise_rows(x) @ self.w_mlp1 + self.b_mlp1
         # h *= scipy.stats.norm.cdf(h)  # gelu
@@ -121,7 +170,7 @@ warmup = True
 
 def gpt2(head_activations, threshold):
     x = wte[prompt_tokens] + wpe[:n_seq]
-    for block in (tqdm(blocks) if warmup else blocks):
+    for block in tqdm(blocks) if warmup else blocks:
         x = block(x, head_activations, threshold)
         assert x.mean() < 1e-5
     final = normalise_rows(x) * w_ln + b_ln
@@ -144,7 +193,10 @@ def kl_divergence(p, q):
 def grad_objective(head_activations, probs_ref):
     logits = gpt2(head_activations, 0)[-1]
     probs = softmax(logits)
-    return kl_divergence(probs_ref, probs) + 10 * np.sum(head_activations) / head_activations.size
+    return (
+        kl_divergence(probs_ref, probs)
+        + 10 * np.sum(head_activations) / head_activations.size
+    )
 
 
 if __name__ == "__main__":
@@ -177,15 +229,26 @@ if __name__ == "__main__":
         # token = np.random.choice(top_k, p=top_k_probs)
 
         for token, prob in zip(top_k, top_k_probs):
-            print(f"'{encoder.decode([int(token)])}' {100 * prob:.1f}%", end="; ", flush=True)
+            print(
+                f"'{encoder.decode([int(token)])}' {100 * prob:.1f}%",
+                end="; ",
+                flush=True,
+            )
         print()
 
         warmup = False
 
-    for i in range(n_seq):
+    jax.config.update("jax_disable_jit", True)
+    analyse = True
+
+    for i in range(1, n_seq):
         print(encoder.decode([int(prompt_tokens[i])]), end=" ")
+        analyse_posn = i
+        analyse_heads = []
         for j in range(n_layer):
             for k in range(n_head):
                 if head_activations[i, j, k] > 0.1:
                     print(f"{j}.{k}", end=" ")
+                    analyse_heads.append((j, k))
         print()
+        gpt2(head_activations, 0.04)
