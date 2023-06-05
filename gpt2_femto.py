@@ -161,17 +161,33 @@ class TransformerBlock:
         ks = np.split(K, n_head, axis=1)
         vs = np.split(V, n_head, axis=1)
         hs = np.split(head_activations[:, self.layer, :], n_head, axis=1)
+        qkv_impure = normalise_rows(impure_x) @ self.w_qkv + self.b_qkv
+        Q_impure, K_impure, V_impure = np.split(qkv_impure, 3, axis=1)
+        qs_impure = np.split(Q_impure, n_head, axis=1)
+        ks_impure = np.split(K_impure, n_head, axis=1)
+        vs_impure = np.split(V_impure, n_head, axis=1)
         attn = np.hstack(
             [
-                self.attention(threshold, True, i, *args)
-                for i, args in enumerate(zip(qs, ks, vs, hs))
+                np.vstack(
+                    [
+                        self.attention(threshold, True, i, qs[i], ks[i], vs[i], hs[i])[
+                            :-1
+                        ],
+                        self.attention(
+                            threshold, True, i, qs_impure[i], ks[i], vs[i], hs[i]
+                        )[-1],
+                    ]
+                )
+                if self.layer == 9 and (i == 6 or i == 9)
+                else self.attention(threshold, True, i, qs[i], ks[i], vs[i], hs[i])
+                for i in range(n_head)
             ]
         )
         pure_x += attn @ self.w_out + self.b_out
 
         attn = np.hstack(
             [
-                self.attention(threshold, False, i, *args)
+                self.attention(threshold, self.layer >= 9, i, *args)
                 for i, args in enumerate(zip(qs, ks, vs, hs))
             ]
         )
@@ -215,7 +231,7 @@ def gpt2(head_activations, threshold):
     for block in tqdm(blocks) if warmup else blocks:
         pure_x, impure_x = block(pure_x, impure_x, head_activations, threshold)
         # assert x.mean() < 1e-5
-    final = normalise_rows(impure_x) * w_ln + b_ln
+    final = normalise_rows(pure_x) * w_ln + b_ln
     logits = final @ w_unembed
     return logits
 
@@ -281,16 +297,19 @@ if __name__ == "__main__":
     analyse = True
 
     sensitivity = grad_logit_diff(head_activations)
-    print(sensitivity[-1])
+    # logits = gpt2(head_activations, 0)[-1]
+    # probs = softmax(logits)
+    # print_top_k(probs, 5)
+    # print(sensitivity[-1])
     warmup = False
 
-    for i in range(n_seq - 1, n_seq):
+    for i in range(1, n_seq):
         print(encoder.decode([int(prompt_tokens[i])]), end=" ")
         analyse_posn = i
         analyse_heads = []
         for j in range(n_layer):
             for k in range(n_head):
-                if abs(sensitivity[i, j, k]) > 0.1:
+                if abs(sensitivity[i, j, k]) > 0.05:
                     print(
                         f"{j}.{k} -- {sensitivity[i, j, k]:.2f}",
                         # end=" ",
