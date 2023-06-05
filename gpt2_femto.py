@@ -47,20 +47,34 @@ wpe -= wpe.mean(axis=1, keepdims=True)
 
 force_enable_layers = 0
 
-prompt_tokens = [50256] + encoder.encode(
-    "When Mary and John went to the store, John gave a drink to"
-    # "Alan Turing theorized that computers would one day become"
-)
-prompt_tokens = np.array(prompt_tokens, dtype=np.int32)
+prompts = [
+    "When John and Mary went to the shops, John gave the bag to",
+    "When John and Mary went to the shops, Mary gave the bag to",
+    "When Tom and James went to the park, James gave the ball to",
+    "When Tom and James went to the park, Tom gave the ball to",
+    "When Dan and Sid went to the shops, Sid gave an apple to",
+    "When Dan and Sid went to the shops, Dan gave an apple to",
+    "After Martin and Amy went to the park, Amy gave a drink to",
+    "After Martin and Amy went to the park, Martin gave a drink to",
+]
+answers = [
+    (" Mary", " John"),
+    (" John", " Mary"),
+    (" Tom", " James"),
+    (" James", " Tom"),
+    (" Dan", " Sid"),
+    (" Sid", " Dan"),
+    (" Martin", " Amy"),
+    (" Amy", " Martin"),
+]
 
-n_seq = len(prompt_tokens)
+prompt_tokens = [np.array([50256] + encoder.encode(s), dtype=np.int32) for s in prompts]
+
+n_seq = 15
 causal_mask = np.tri(n_seq, dtype=np.float32)
 
-# important_tokens = np.array(encoder.encode(" Mary them John the her"))
-
-analyse = False
-analyse_posn = 0
-analyse_heads = []
+for toks in prompt_tokens:
+    assert toks.size == n_seq
 
 
 def normalise_rows(x):
@@ -111,40 +125,6 @@ class TransformerBlock:
         A *= A > threshold
         A /= np.sum(A, axis=1, keepdims=True)
 
-        if analyse and ((self.layer, i) in analyse_heads or analyse_posn == n_seq - 1):
-            print(
-                f"{self.layer}.{i}",
-                end=": ",
-                flush=True,
-                format="bold" if (self.layer, i) in analyse_heads else None,
-            )
-            for token, amt in zip(
-                prompt_tokens[1 : analyse_posn + 1],
-                A[analyse_posn, 1 : analyse_posn + 1],
-            ):
-                token = int(token)
-                if amt > 0:
-                    print(
-                        encoder.decode([token]),
-                        end="",
-                        flush=True,
-                        colour="green"
-                        if amt > 0.5
-                        else "yellow"
-                        if amt > 0.1
-                        else "red",
-                    )
-                else:
-                    print(encoder.decode([token]), end="", flush=True)
-
-            # logit lens just for the output of this head
-            x_head = self.x_copy
-            x_head += (A @ v) @ self.w_out[D * i : D * (i + 1), :] + self.b_out
-            logits = (normalise_rows(x_head) * w_ln + b_ln) @ w_unembed
-            probs = softmax(logits[analyse_posn])
-            print("| ", end="", flush=True)
-            print_top_k(probs, 5)
-
         if pure or self.layer < force_enable_layers:
             return A @ v
         else:
@@ -152,9 +132,6 @@ class TransformerBlock:
 
     @functools.partial(jax.jit, static_argnames=["self"])
     def __call__(self, pure_x, impure_x, head_activations, threshold):
-        if analyse:
-            self.x_copy = pure_x.copy()
-
         qkv = normalise_rows(pure_x) @ self.w_qkv + self.b_qkv
         Q, K, V = np.split(qkv, 3, axis=1)
         qs = np.split(Q, n_head, axis=1)
@@ -193,13 +170,6 @@ class TransformerBlock:
         )
         impure_x += attn @ self.w_out + self.b_out
 
-        if analyse and analyse_posn == n_seq - 1:
-            # logit lens
-            logits = (normalise_rows(x) * w_ln + b_ln) @ w_unembed
-            probs = softmax(logits[analyse_posn])
-            print(f"Layer {self.layer} prediction midway: ", end="", flush=True)
-            print_top_k(probs, 5)
-
         h = normalise_rows(pure_x) @ self.w_mlp1 + self.b_mlp1
         # h *= scipy.stats.norm.cdf(h)  # gelu
         h *= (1 + erf(h / np.sqrt(2))) / 2
@@ -210,12 +180,6 @@ class TransformerBlock:
         h *= (1 + erf(h / np.sqrt(2))) / 2
         impure_x += h @ self.w_mlp2 + self.b_mlp2
 
-        if analyse and analyse_posn == n_seq - 1:
-            # logit lens
-            logits = (normalise_rows(x) * w_ln + b_ln) @ w_unembed
-            probs = softmax(logits[analyse_posn])
-            print(f"Layer {self.layer} prediction updated to: ", end="", flush=True)
-            print_top_k(probs, 5)
         return pure_x, impure_x
 
 
@@ -224,8 +188,8 @@ blocks = [TransformerBlock(b) for b in range(n_layer)]
 warmup = True
 
 
-def gpt2(head_activations, threshold):
-    x = wte[prompt_tokens] + wpe[:n_seq]
+def gpt2(which_prompt, head_activations, threshold):
+    x = wte[prompt_tokens[which_prompt]] + wpe[:n_seq]
     pure_x = x.copy()
     impure_x = x.copy()
     for block in tqdm(blocks) if warmup else blocks:
@@ -259,11 +223,15 @@ def grad_objective(head_activations, probs_ref):
 
 @jax.grad
 def grad_logit_diff(head_activations):
-    logits = gpt2(head_activations, 0)[-1]
-    return (
-        logits[int(encoder.encode(" Mary")[0])]
-        - logits[int(encoder.encode(" John")[0])]
-    )
+    sum = 0
+    for p in range(len(prompts)):
+        logits = gpt2(p, head_activations, 0)[-1]
+        correct, incorrect = answers[p]
+        sum += (
+            logits[int(encoder.encode(correct)[0])]
+            - logits[int(encoder.encode(incorrect)[0])]
+        )
+    return sum / len(prompts)
 
 
 if __name__ == "__main__":
@@ -293,8 +261,8 @@ if __name__ == "__main__":
         warmup = False
     """
 
-    jax.config.update("jax_disable_jit", True)
-    analyse = True
+    # jax.config.update("jax_disable_jit", True)
+    # analyse = True
 
     sensitivity = grad_logit_diff(head_activations)
     # logits = gpt2(head_activations, 0)[-1]
@@ -304,12 +272,12 @@ if __name__ == "__main__":
     warmup = False
 
     for i in range(1, n_seq):
-        print(encoder.decode([int(prompt_tokens[i])]), end=" ")
+        print(encoder.decode([int(prompt_tokens[0][i])]), end=" ")
         analyse_posn = i
         analyse_heads = []
         for j in range(n_layer):
             for k in range(n_head):
-                if abs(sensitivity[i, j, k]) > 0.05:
+                if abs(sensitivity[i, j, k]) > 0.1:
                     print(
                         f"{j}.{k} -- {sensitivity[i, j, k]:.2f}",
                         # end=" ",
