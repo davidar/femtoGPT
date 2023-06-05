@@ -45,7 +45,7 @@ w_unembed -= w_unembed.mean(axis=1, keepdims=True)
 wte -= wte.mean(axis=1, keepdims=True)
 wpe -= wpe.mean(axis=1, keepdims=True)
 
-force_enable_layers = 4
+force_enable_layers = 0
 
 prompt_tokens = [50256] + encoder.encode(
     "When Mary and John went to the store, John gave a drink to"
@@ -105,7 +105,7 @@ class TransformerBlock:
         self.w_mlp2 = params[f"h.{b}.mlp.c_proj.weight"]
         self.w_mlp2 -= self.w_mlp2.mean(axis=1, keepdims=True)
 
-    def attention(self, threshold, i, q, k, v, h):
+    def attention(self, threshold, pure, i, q, k, v, h):
         A = np.exp(q @ k.T / np.sqrt(D)) * causal_mask
         A /= np.sum(A, axis=1, keepdims=True)
         A *= A > threshold
@@ -145,17 +145,17 @@ class TransformerBlock:
             print("| ", end="", flush=True)
             print_top_k(probs, 5)
 
-        if self.layer < force_enable_layers:
+        if pure or self.layer < force_enable_layers:
             return A @ v
         else:
             return (A @ v) * h
 
     @functools.partial(jax.jit, static_argnames=["self"])
-    def __call__(self, x, head_activations, threshold):
+    def __call__(self, pure_x, impure_x, head_activations, threshold):
         if analyse:
-            self.x_copy = x.copy()
+            self.x_copy = pure_x.copy()
 
-        qkv = normalise_rows(x) @ self.w_qkv + self.b_qkv
+        qkv = normalise_rows(pure_x) @ self.w_qkv + self.b_qkv
         Q, K, V = np.split(qkv, 3, axis=1)
         qs = np.split(Q, n_head, axis=1)
         ks = np.split(K, n_head, axis=1)
@@ -163,11 +163,19 @@ class TransformerBlock:
         hs = np.split(head_activations[:, self.layer, :], n_head, axis=1)
         attn = np.hstack(
             [
-                self.attention(threshold, i, *args)
+                self.attention(threshold, True, i, *args)
                 for i, args in enumerate(zip(qs, ks, vs, hs))
             ]
         )
-        x += attn @ self.w_out + self.b_out
+        pure_x += attn @ self.w_out + self.b_out
+
+        attn = np.hstack(
+            [
+                self.attention(threshold, False, i, *args)
+                for i, args in enumerate(zip(qs, ks, vs, hs))
+            ]
+        )
+        impure_x += attn @ self.w_out + self.b_out
 
         if analyse and analyse_posn == n_seq - 1:
             # logit lens
@@ -176,10 +184,15 @@ class TransformerBlock:
             print(f"Layer {self.layer} prediction midway: ", end="", flush=True)
             print_top_k(probs, 5)
 
-        h = normalise_rows(x) @ self.w_mlp1 + self.b_mlp1
+        h = normalise_rows(pure_x) @ self.w_mlp1 + self.b_mlp1
         # h *= scipy.stats.norm.cdf(h)  # gelu
         h *= (1 + erf(h / np.sqrt(2))) / 2
-        x += h @ self.w_mlp2 + self.b_mlp2
+        pure_x += h @ self.w_mlp2 + self.b_mlp2
+
+        h = normalise_rows(impure_x) @ self.w_mlp1 + self.b_mlp1
+        # h *= scipy.stats.norm.cdf(h)  # gelu
+        h *= (1 + erf(h / np.sqrt(2))) / 2
+        impure_x += h @ self.w_mlp2 + self.b_mlp2
 
         if analyse and analyse_posn == n_seq - 1:
             # logit lens
@@ -187,7 +200,7 @@ class TransformerBlock:
             probs = softmax(logits[analyse_posn])
             print(f"Layer {self.layer} prediction updated to: ", end="", flush=True)
             print_top_k(probs, 5)
-        return x
+        return pure_x, impure_x
 
 
 blocks = [TransformerBlock(b) for b in range(n_layer)]
@@ -197,10 +210,12 @@ warmup = True
 
 def gpt2(head_activations, threshold):
     x = wte[prompt_tokens] + wpe[:n_seq]
+    pure_x = x.copy()
+    impure_x = x.copy()
     for block in tqdm(blocks) if warmup else blocks:
-        x = block(x, head_activations, threshold)
-        assert x.mean() < 1e-5
-    final = normalise_rows(x) * w_ln + b_ln
+        pure_x, impure_x = block(pure_x, impure_x, head_activations, threshold)
+        # assert x.mean() < 1e-5
+    final = normalise_rows(impure_x) * w_ln + b_ln
     logits = final @ w_unembed
     return logits
 
@@ -226,8 +241,18 @@ def grad_objective(head_activations, probs_ref):
     )
 
 
+@jax.grad
+def grad_logit_diff(head_activations):
+    logits = gpt2(head_activations, 0)[-1]
+    return (
+        logits[int(encoder.encode(" Mary")[0])]
+        - logits[int(encoder.encode(" John")[0])]
+    )
+
+
 if __name__ == "__main__":
     head_activations = np.ones((n_seq, n_layer, n_head), dtype=np.float32)
+    """
     probs_ref = softmax(gpt2(head_activations, 0)[-1])
     for i in range(250):
         print(f"Step {i}", end="; ")
@@ -250,19 +275,32 @@ if __name__ == "__main__":
         print_top_k(probs, 5)
 
         warmup = False
+    """
 
     jax.config.update("jax_disable_jit", True)
     analyse = True
 
-    for i in range(1, n_seq):
+    sensitivity = grad_logit_diff(head_activations)
+    print(sensitivity[-1])
+    warmup = False
+
+    for i in range(n_seq - 1, n_seq):
         print(encoder.decode([int(prompt_tokens[i])]), end=" ")
         analyse_posn = i
         analyse_heads = []
         for j in range(n_layer):
             for k in range(n_head):
-                if head_activations[i, j, k] > 0.1:
-                    print(f"{j}.{k}", end=" ")
+                if abs(sensitivity[i, j, k]) > 0.1:
+                    print(
+                        f"{j}.{k} -- {sensitivity[i, j, k]:.2f}",
+                        # end=" ",
+                        colour="green"
+                        if abs(sensitivity[i, j, k]) > 1.0
+                        else "yellow"
+                        if abs(sensitivity[i, j, k]) > 0.5
+                        else "red",
+                    )
                     analyse_heads.append((j, k))
         print()
-        if len(analyse_heads) > 0:
-            gpt2(head_enable, 0.04)
+        # if len(analyse_heads) > 0:
+        #     gpt2(head_activations, 0.04)
