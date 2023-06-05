@@ -174,11 +174,11 @@ class TransformerBlock:
                             :-1
                         ],
                         self.attention(
-                            threshold, True, i, qs_impure[i], ks[i], vs[i], hs[i]
+                            threshold, True, i, qs[i], ks[i], vs_impure[i], hs[i]
                         )[-1],
                     ]
                 )
-                if self.layer == 9 and (i == 6 or i == 9)
+                if self.layer == 8 and (i == 6 or i == 10)
                 else self.attention(threshold, True, i, qs[i], ks[i], vs[i], hs[i])
                 for i in range(n_head)
             ]
