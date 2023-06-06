@@ -41,9 +41,9 @@ b_ln = params["ln_f.bias"]
 
 # centering
 w_unembed = wte.T.copy()
-w_unembed -= w_unembed.mean(axis=1, keepdims=True)
-wte -= wte.mean(axis=1, keepdims=True)
-wpe -= wpe.mean(axis=1, keepdims=True)
+w_unembed -= w_unembed.mean(axis=-1, keepdims=True)
+wte -= wte.mean(axis=-1, keepdims=True)
+wpe -= wpe.mean(axis=-1, keepdims=True)
 
 force_enable_layers = 0
 
@@ -78,7 +78,7 @@ for toks in prompt_tokens:
 
 
 def normalise_rows(x):
-    return x / np.linalg.norm(x, axis=1, keepdims=True)
+    return x / np.linalg.norm(x, axis=-1, keepdims=True)
 
 
 def cosine_similarity(x, y):
@@ -99,6 +99,9 @@ def print_top_k(probs, k):
     print()
 
 
+n_streams = 2
+
+
 class TransformerBlock:
     def __init__(self, b):
         self.layer = b
@@ -109,7 +112,7 @@ class TransformerBlock:
         self.b_out = params[f"h.{b}.attn.c_proj.bias"]
         self.b_out -= self.b_out.mean(keepdims=True)
         self.w_out = params[f"h.{b}.attn.c_proj.weight"]
-        self.w_out -= self.w_out.mean(axis=1, keepdims=True)
+        self.w_out -= self.w_out.mean(axis=-1, keepdims=True)
         self.b_mlp1 = params[f"h.{b}.mlp.c_fc.bias"]
         self.b_mlp1 += params[f"h.{b}.ln_2.bias"] @ params[f"h.{b}.mlp.c_fc.weight"]
         self.w_mlp1 = params[f"h.{b}.mlp.c_fc.weight"]
@@ -117,73 +120,68 @@ class TransformerBlock:
         self.b_mlp2 = params[f"h.{b}.mlp.c_proj.bias"]
         self.b_mlp2 -= self.b_mlp2.mean(keepdims=True)
         self.w_mlp2 = params[f"h.{b}.mlp.c_proj.weight"]
-        self.w_mlp2 -= self.w_mlp2.mean(axis=1, keepdims=True)
+        self.w_mlp2 -= self.w_mlp2.mean(axis=-1, keepdims=True)
 
-    def attention(self, threshold, pure, i, q, k, v, h):
+    def attention(self, threshold, q, k, v, h):
         A = np.exp(q @ k.T / np.sqrt(D)) * causal_mask
-        A /= np.sum(A, axis=1, keepdims=True)
+        A /= np.sum(A, axis=-1, keepdims=True)
         A *= A > threshold
-        A /= np.sum(A, axis=1, keepdims=True)
-
-        if pure or self.layer < force_enable_layers:
-            return A @ v
-        else:
-            return (A @ v) * h
+        A /= np.sum(A, axis=-1, keepdims=True)
+        return (A @ v) * h
 
     @functools.partial(jax.jit, static_argnames=["self"])
-    def __call__(self, pure_x, impure_x, head_activations, threshold):
-        qkv = normalise_rows(pure_x) @ self.w_qkv + self.b_qkv
-        Q, K, V = np.split(qkv, 3, axis=1)
-        qs = np.split(Q, n_head, axis=1)
-        ks = np.split(K, n_head, axis=1)
-        vs = np.split(V, n_head, axis=1)
-        hs = np.split(head_activations[:, self.layer, :], n_head, axis=1)
-        qkv_impure = normalise_rows(impure_x) @ self.w_qkv + self.b_qkv
-        Q_impure, K_impure, V_impure = np.split(qkv_impure, 3, axis=1)
-        qs_impure = np.split(Q_impure, n_head, axis=1)
-        ks_impure = np.split(K_impure, n_head, axis=1)
-        vs_impure = np.split(V_impure, n_head, axis=1)
-        attn = np.hstack(
+    def __call__(self, x, head_activations, threshold):
+        qkv = normalise_rows(x) @ self.w_qkv + self.b_qkv
+        Q, K, V = np.split(qkv, 3, axis=-1)
+        qs = np.split(Q, n_head, axis=-1)
+        ks = np.split(K, n_head, axis=-1)
+        vs = np.split(V, n_head, axis=-1)
+        hs = np.split(head_activations[:, :, self.layer, :], n_head, axis=-1)
+        attn = np.stack(
             [
-                np.vstack(
+                np.hstack(
                     [
-                        self.attention(threshold, True, i, qs[i], ks[i], vs[i], hs[i])[
-                            :-5
-                        ],
                         self.attention(
-                            threshold, True, i, qs_impure[i], ks[i], vs[i], hs[i]
-                        )[-5],
-                        self.attention(threshold, True, i, qs[i], ks[i], vs[i], hs[i])[
-                            -4:
-                        ],
+                            threshold,
+                            np.vstack(
+                                [
+                                    qs[i][0, :-5],
+                                    qs[i][1, -5],
+                                    qs[i][0, -4:],
+                                ]
+                            ),
+                            ks[i][0],
+                            vs[i][0],
+                            hs[i][0],
+                        )
+                        if (self.layer == 5 and i == 5)
+                        or (self.layer == 5 and i == 8)
+                        or (self.layer == 5 and i == 9)
+                        or (self.layer == 6 and i == 9)
+                        else self.attention(
+                            threshold, qs[i][0], ks[i][0], vs[i][0], hs[i][0]
+                        )
+                        for i in range(n_head)
                     ]
-                )
-                if (self.layer == 5 and i == 5) or (self.layer == 5 and i == 8) or (self.layer == 5 and i == 9) or (self.layer == 6 and i == 9)
-                else self.attention(threshold, True, i, qs[i], ks[i], vs[i], hs[i])
-                for i in range(n_head)
+                ),
+                np.hstack(
+                    [
+                        self.attention(
+                            threshold, qs[i][0], ks[i][0], vs[i][0], hs[i][1]
+                        )
+                        for i in range(n_head)
+                    ]
+                ),
             ]
         )
-        pure_x += attn @ self.w_out + self.b_out
+        x += attn @ self.w_out + self.b_out
 
-        attn = np.hstack(
-            [
-                self.attention(threshold, False, i, *args)
-                for i, args in enumerate(zip(qs, ks, vs, hs))
-            ]
-        )
-        impure_x += attn @ self.w_out + self.b_out
-
-        h = normalise_rows(pure_x) @ self.w_mlp1 + self.b_mlp1
+        h = normalise_rows(x) @ self.w_mlp1 + self.b_mlp1
         # h *= scipy.stats.norm.cdf(h)  # gelu
         h *= (1 + erf(h / np.sqrt(2))) / 2
-        pure_x += h @ self.w_mlp2 + self.b_mlp2
+        x += h @ self.w_mlp2 + self.b_mlp2
 
-        h = normalise_rows(impure_x) @ self.w_mlp1 + self.b_mlp1
-        # h *= scipy.stats.norm.cdf(h)  # gelu
-        h *= (1 + erf(h / np.sqrt(2))) / 2
-        impure_x += h @ self.w_mlp2 + self.b_mlp2
-
-        return pure_x, impure_x
+        return x
 
 
 blocks = [TransformerBlock(b) for b in range(n_layer)]
@@ -193,12 +191,11 @@ warmup = True
 
 def gpt2(which_prompt, head_activations, threshold):
     x = wte[prompt_tokens[which_prompt]] + wpe[:n_seq]
-    pure_x = x.copy()
-    impure_x = x.copy()
+    x = np.stack([x] * n_streams)
     for block in tqdm(blocks) if warmup else blocks:
-        pure_x, impure_x = block(pure_x, impure_x, head_activations, threshold)
+        x = block(x, head_activations, threshold)
         # assert x.mean() < 1e-5
-    final = normalise_rows(pure_x) * w_ln + b_ln
+    final = normalise_rows(x[0]) * w_ln + b_ln
     logits = final @ w_unembed
     return logits
 
@@ -238,7 +235,7 @@ def grad_logit_diff(head_activations):
 
 
 if __name__ == "__main__":
-    head_activations = np.ones((n_seq, n_layer, n_head), dtype=np.float32)
+    head_activations = np.ones((n_streams, n_seq, n_layer, n_head), dtype=np.float32)
     """
     probs_ref = softmax(gpt2(head_activations, 0)[-1])
     for i in range(250):
@@ -278,19 +275,15 @@ if __name__ == "__main__":
         print(encoder.decode([int(prompt_tokens[0][i])]), end=" ")
         analyse_posn = i
         analyse_heads = []
-        absmax = max(np.abs(sensitivity[i, :, :]).max(), 0.5)
+        absmax = max(np.abs(sensitivity[1, i, :, :]).max(), 0.5)
         for j in range(n_layer):
             for k in range(n_head):
-                s = np.abs(sensitivity[i, j, k]) / absmax
+                s = np.abs(sensitivity[1, i, j, k]) / absmax
                 if s > 0.1:
                     print(
-                        f"{j}.{k} -- {sensitivity[i, j, k]:.2f}",
+                        f"{j}.{k} -- {sensitivity[1, i, j, k]:.2f}",
                         # end=" ",
-                        colour="green"
-                        if s > 0.5
-                        else "yellow"
-                        if s > 0.25
-                        else "red",
+                        colour="green" if s > 0.5 else "yellow" if s > 0.25 else "red",
                     )
                     analyse_heads.append((j, k))
         print()
