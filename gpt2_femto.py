@@ -101,6 +101,15 @@ def print_top_k(probs, k):
 
 n_streams = 2
 
+q_stream = np.zeros((n_streams, n_layer, n_head, n_seq), dtype=np.int32)
+# q_stream = q_stream.at[0, 5, 5, -5].set(1)
+# q_stream = q_stream.at[0, 5, 8, -5].set(1)
+# q_stream = q_stream.at[0, 5, 9, -5].set(1)
+# q_stream = q_stream.at[0, 6, 9, -5].set(1)
+q_stream = q_stream.at[0, 9, 6, -1].set(1)
+q_stream = q_stream.at[0, 9, 9, -1].set(1)
+q_stream = q_stream.at[0, 10, 0, -1].set(1)
+
 
 class TransformerBlock:
     def __init__(self, b):
@@ -143,35 +152,15 @@ class TransformerBlock:
                     [
                         self.attention(
                             threshold,
-                            np.vstack(
-                                [
-                                    qs[i][0, :-5],
-                                    qs[i][1, -5],
-                                    qs[i][0, -4:],
-                                ]
-                            ),
+                            qs[i][q_stream[stream, self.layer, i], np.arange(n_seq)],
                             ks[i][0],
                             vs[i][0],
-                            hs[i][0],
-                        )
-                        if (self.layer == 5 and i == 5)
-                        or (self.layer == 5 and i == 8)
-                        or (self.layer == 5 and i == 9)
-                        or (self.layer == 6 and i == 9)
-                        else self.attention(
-                            threshold, qs[i][0], ks[i][0], vs[i][0], hs[i][0]
+                            hs[i][stream],
                         )
                         for i in range(n_head)
                     ]
-                ),
-                np.hstack(
-                    [
-                        self.attention(
-                            threshold, qs[i][0], ks[i][0], vs[i][0], hs[i][1]
-                        )
-                        for i in range(n_head)
-                    ]
-                ),
+                )
+                for stream in range(n_streams)
             ]
         )
         x += attn @ self.w_out + self.b_out
@@ -185,6 +174,8 @@ class TransformerBlock:
 
 
 blocks = [TransformerBlock(b) for b in range(n_layer)]
+
+# print(jax.make_jaxpr(lambda x: blocks[0](x, np.ones((n_streams, n_seq, n_layer, n_head)), 0))(np.stack([wpe[:n_seq]] * n_streams)))
 
 warmup = True
 
