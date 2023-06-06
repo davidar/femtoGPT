@@ -148,14 +148,17 @@ class TransformerBlock:
                 np.vstack(
                     [
                         self.attention(threshold, True, i, qs[i], ks[i], vs[i], hs[i])[
-                            :-1
+                            :-5
                         ],
                         self.attention(
-                            threshold, True, i, qs[i], ks[i], vs_impure[i], hs[i]
-                        )[-1],
+                            threshold, True, i, qs_impure[i], ks[i], vs[i], hs[i]
+                        )[-5],
+                        self.attention(threshold, True, i, qs[i], ks[i], vs[i], hs[i])[
+                            -4:
+                        ],
                     ]
                 )
-                if self.layer == 8 and (i == 6 or i == 10)
+                if (self.layer == 5 and i == 5) or (self.layer == 5 and i == 8) or (self.layer == 5 and i == 9) or (self.layer == 6 and i == 9)
                 else self.attention(threshold, True, i, qs[i], ks[i], vs[i], hs[i])
                 for i in range(n_head)
             ]
@@ -164,7 +167,7 @@ class TransformerBlock:
 
         attn = np.hstack(
             [
-                self.attention(threshold, self.layer >= 9, i, *args)
+                self.attention(threshold, False, i, *args)
                 for i, args in enumerate(zip(qs, ks, vs, hs))
             ]
         )
@@ -275,16 +278,18 @@ if __name__ == "__main__":
         print(encoder.decode([int(prompt_tokens[0][i])]), end=" ")
         analyse_posn = i
         analyse_heads = []
+        absmax = max(np.abs(sensitivity[i, :, :]).max(), 0.5)
         for j in range(n_layer):
             for k in range(n_head):
-                if abs(sensitivity[i, j, k]) > 0.1:
+                s = np.abs(sensitivity[i, j, k]) / absmax
+                if s > 0.1:
                     print(
                         f"{j}.{k} -- {sensitivity[i, j, k]:.2f}",
                         # end=" ",
                         colour="green"
-                        if abs(sensitivity[i, j, k]) > 1.0
+                        if s > 0.5
                         else "yellow"
-                        if abs(sensitivity[i, j, k]) > 0.5
+                        if s > 0.25
                         else "red",
                     )
                     analyse_heads.append((j, k))
