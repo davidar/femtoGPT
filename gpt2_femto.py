@@ -102,13 +102,22 @@ def print_top_k(probs, k):
 n_streams = 2
 
 q_stream = np.zeros((n_streams, n_layer, n_head, n_seq), dtype=np.int32)
+
 # q_stream = q_stream.at[0, 5, 5, -5].set(1)
 # q_stream = q_stream.at[0, 5, 8, -5].set(1)
 # q_stream = q_stream.at[0, 5, 9, -5].set(1)
 # q_stream = q_stream.at[0, 6, 9, -5].set(1)
-q_stream = q_stream.at[0, 9, 6, -1].set(1)
-q_stream = q_stream.at[0, 9, 9, -1].set(1)
-q_stream = q_stream.at[0, 10, 0, -1].set(1)
+
+# q_stream = q_stream.at[0, 9, 6, -1].set(1)
+# q_stream = q_stream.at[0, 9, 9, -1].set(1)
+# q_stream = q_stream.at[0, 10, 0, -1].set(1)
+
+k_stream = np.zeros((n_streams, n_layer, n_head, n_seq), dtype=np.int32)
+
+k_stream = k_stream.at[0, 5, 5, :].set(1)
+k_stream = k_stream.at[0, 5, 8, :].set(1)
+k_stream = k_stream.at[0, 5, 9, :].set(1)
+k_stream = k_stream.at[0, 6, 9, :].set(1)
 
 
 class TransformerBlock:
@@ -131,12 +140,12 @@ class TransformerBlock:
         self.w_mlp2 = params[f"h.{b}.mlp.c_proj.weight"]
         self.w_mlp2 -= self.w_mlp2.mean(axis=-1, keepdims=True)
 
-    def attention(self, threshold, q, k, v, h):
+    def attention(self, threshold, q, k):
         A = np.exp(q @ k.T / np.sqrt(D)) * causal_mask
         A /= np.sum(A, axis=-1, keepdims=True)
-        A *= A > threshold
-        A /= np.sum(A, axis=-1, keepdims=True)
-        return (A @ v) * h
+        # A *= A > threshold
+        # A /= np.sum(A, axis=-1, keepdims=True)
+        return A
 
     @functools.partial(jax.jit, static_argnames=["self"])
     def __call__(self, x, head_activations, threshold):
@@ -153,10 +162,10 @@ class TransformerBlock:
                         self.attention(
                             threshold,
                             qs[i][q_stream[stream, self.layer, i], np.arange(n_seq)],
-                            ks[i][0],
-                            vs[i][0],
-                            hs[i][stream],
+                            ks[i][k_stream[stream, self.layer, i], np.arange(n_seq)],
                         )
+                        @ vs[i][0]
+                        * hs[i][stream]
                         for i in range(n_head)
                     ]
                 )
