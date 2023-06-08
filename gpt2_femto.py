@@ -139,12 +139,51 @@ class TransformerBlock:
             [
                 np.hstack(
                     [
-                        self.attention(
-                            qs[i][q_stream[stream, self.layer, i], np.arange(n_seq)],
-                            ks[i][k_stream[stream, self.layer, i], np.arange(n_seq)],
+                        np.where(
+                            v_stream[stream, self.layer, i].reshape(-1, 1) == 0,
+                            np.where(
+                                k_stream[stream, self.layer, i].reshape(-1, 1) == 0,
+                                self.attention(
+                                    qs[i][
+                                        q_stream[stream, self.layer, i],
+                                        np.arange(n_seq),
+                                    ],
+                                    ks[i][0],
+                                )
+                                @ vs[i][0]
+                                * hs[i][stream],
+                                self.attention(
+                                    qs[i][
+                                        q_stream[stream, self.layer, i],
+                                        np.arange(n_seq),
+                                    ],
+                                    ks[i][1],
+                                )
+                                @ vs[i][0]
+                                * hs[i][stream],
+                            ),
+                            np.where(
+                                k_stream[stream, self.layer, i].reshape(-1, 1) == 0,
+                                self.attention(
+                                    qs[i][
+                                        q_stream[stream, self.layer, i],
+                                        np.arange(n_seq),
+                                    ],
+                                    ks[i][0],
+                                )
+                                @ vs[i][1]
+                                * hs[i][stream],
+                                self.attention(
+                                    qs[i][
+                                        q_stream[stream, self.layer, i],
+                                        np.arange(n_seq),
+                                    ],
+                                    ks[i][1],
+                                )
+                                @ vs[i][1]
+                                * hs[i][stream],
+                            ),
                         )
-                        @ vs[i][v_stream[stream, self.layer, i], np.arange(n_seq)]
-                        * hs[i][stream]
                         for i in range(n_head)
                     ]
                 )
@@ -188,7 +227,9 @@ def softmax(x):
 def grad_logit_diff(head_activations, q_stream, k_stream, v_stream, output_stream):
     sum = 0
     for p in range(len(prompts)):
-        logits = gpt2(p, head_activations, q_stream, k_stream, v_stream, output_stream)[-1]
+        logits = gpt2(p, head_activations, q_stream, k_stream, v_stream, output_stream)[
+            -1
+        ]
         correct, incorrect = answers[p]
         sum += (
             logits[int(encoder.encode(correct)[0])]
@@ -205,7 +246,9 @@ if __name__ == "__main__":
 
     print("Name Mover heads", format="bold")
 
-    sensitivity = grad_logit_diff(head_activations, q_stream, k_stream, v_stream, 1).__array__()
+    sensitivity = grad_logit_diff(
+        head_activations, q_stream, k_stream, v_stream, 1
+    ).__array__()
 
     for posn in range(1, n_seq):
         print(encoder.decode([int(prompt_tokens[0][posn])]), end=" ")
@@ -226,7 +269,9 @@ if __name__ == "__main__":
     print("S-Inhibition heads", format="bold")
 
     # warmup = False
-    sensitivity = grad_logit_diff(head_activations, q_stream, k_stream, v_stream, 0).__array__()
+    sensitivity = grad_logit_diff(
+        head_activations, q_stream, k_stream, v_stream, 0
+    ).__array__()
     q_stream = np.zeros((n_streams, n_layer, n_head, n_seq), dtype=np.int32)
 
     for posn in range(1, n_seq):
@@ -242,12 +287,14 @@ if __name__ == "__main__":
                         colour="green" if s > 0.5 else "yellow" if s > 0.25 else "red",
                     )
                 if s > 0.25:
-                    v_stream = v_stream.at[0, layer, head, :].set(1)
+                    v_stream = v_stream.at[0, layer, head, posn].set(1)
         print()
 
     print("Induction heads", format="bold")
 
-    sensitivity = grad_logit_diff(head_activations, q_stream, k_stream, v_stream, 0).__array__()
+    sensitivity = grad_logit_diff(
+        head_activations, q_stream, k_stream, v_stream, 0
+    ).__array__()
     v_stream = np.zeros((n_streams, n_layer, n_head, n_seq), dtype=np.int32)
 
     for posn in range(1, n_seq):
@@ -264,12 +311,18 @@ if __name__ == "__main__":
                     )
                 if s > 0.25:
                     q_stream = q_stream.at[0, layer, head, posn].set(1)
-                    k_stream = k_stream.at[0, layer, head, :].set(1)
+                    k_stream = k_stream.at[0, layer, head, posn].set(1)
         print()
 
     print("Duplicate token heads", format="bold")
 
-    sensitivity = grad_logit_diff(head_activations, q_stream, np.zeros((n_streams, n_layer, n_head, n_seq), dtype=np.int32), v_stream, 0).__array__()
+    sensitivity = grad_logit_diff(
+        head_activations,
+        q_stream,
+        np.zeros((n_streams, n_layer, n_head, n_seq), dtype=np.int32),
+        v_stream,
+        0,
+    ).__array__()
     q_stream = np.zeros((n_streams, n_layer, n_head, n_seq), dtype=np.int32)
 
     for posn in range(1, n_seq):
@@ -288,23 +341,23 @@ if __name__ == "__main__":
                 #     q_stream = q_stream.at[0, layer, head, posn].set(1)
         print()
 
-    # print("Previous token heads", format="bold")
+    print("Previous token heads", format="bold")
 
-    # sensitivity = grad_logit_diff(head_activations, q_stream, k_stream, v_stream, 0).__array__()
-    # k_stream = np.zeros((n_streams, n_layer, n_head, n_seq), dtype=np.int32)
+    sensitivity = grad_logit_diff(head_activations, q_stream, k_stream, v_stream, 0).__array__()
+    k_stream = np.zeros((n_streams, n_layer, n_head, n_seq), dtype=np.int32)
 
-    # for posn in range(1, n_seq):
-    #     print(encoder.decode([int(prompt_tokens[0][posn])]), end=" ")
-    #     absmax = max(np.abs(sensitivity[1, posn, :, :]).max(), 0.2)
-    #     for layer in range(n_layer):
-    #         for head in range(n_head):
-    #             s = np.abs(sensitivity[1, posn, layer, head]) / absmax
-    #             if s > 0.1:
-    #                 print(
-    #                     f"{layer}.{head} -- {sensitivity[1, posn, layer, head]:.2f}",
-    #                     # end=" ",
-    #                     colour="green" if s > 0.5 else "yellow" if s > 0.25 else "red",
-    #                 )
-    #             # if s > 0.25:
-    #             #     q_stream = q_stream.at[0, layer, head, posn].set(1)
-    #     print()
+    for posn in range(1, n_seq):
+        print(encoder.decode([int(prompt_tokens[0][posn])]), end=" ")
+        absmax = max(np.abs(sensitivity[1, posn, :, :]).max(), 0.2)
+        for layer in range(n_layer):
+            for head in range(n_head):
+                s = np.abs(sensitivity[1, posn, layer, head]) / absmax
+                if s > 0.1:
+                    print(
+                        f"{layer}.{head} -- {sensitivity[1, posn, layer, head]:.2f}",
+                        # end=" ",
+                        colour="green" if s > 0.5 else "yellow" if s > 0.25 else "red",
+                    )
+                # if s > 0.25:
+                #     q_stream = q_stream.at[0, layer, head, posn].set(1)
+        print()
