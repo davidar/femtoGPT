@@ -141,12 +141,6 @@ def new_block(layer):
     )
 
 
-def attention(posn, q, k):
-    A = np.exp(q @ k.T / np.sqrt(D)) * causal_mask[posn]
-    A /= np.sum(A, axis=-1, keepdims=True)
-    return A
-
-
 def nested_vmap(f, X, *Xs):
     if len(Xs) == 0:
         return jax.vmap(f)(X)
@@ -162,18 +156,18 @@ def call_block(b, x, head_activations, q_batch, k_batch, v_batch):
     qs = einops.rearrange(Q, sig, batch=n_batch, posn=n_seq, head=n_head, D=D)
     ks = einops.rearrange(K, sig, batch=n_batch, posn=n_seq, head=n_head, D=D)
     vs = einops.rearrange(V, sig, batch=n_batch, posn=n_seq, head=n_head, D=D)
+
+    def attention(batch, posn, head):
+        idx = (batch, b.layer, head, posn)
+        q = qs[head, q_batch[idx], posn]
+        k = ks[head, k_batch[idx]]
+        v = vs[head, v_batch[idx]]
+        A = np.exp(q @ k.T / np.sqrt(D)) * causal_mask[posn]
+        A /= np.sum(A, axis=-1, keepdims=True)
+        return A @ v
+
     attn = einops.rearrange(
-        nested_vmap(
-            lambda batch, posn, head: attention(
-                posn,
-                qs[head, q_batch[batch, b.layer, head, posn], posn],
-                ks[head, k_batch[batch, b.layer, head, posn]],
-            )
-            @ vs[head, v_batch[batch, b.layer, head, posn]],
-            np.arange(n_batch),
-            np.arange(n_seq),
-            np.arange(n_head),
-        ),
+        nested_vmap(attention, np.arange(n_batch), np.arange(n_seq), np.arange(n_head)),
         "batch posn head D -> batch posn (head D)",
         batch=n_batch,
         posn=n_seq,
