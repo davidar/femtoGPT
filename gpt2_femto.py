@@ -50,7 +50,7 @@ wpe -= wpe.mean(axis=-1, keepdims=True)
 force_enable_layers = 0
 
 prompts = [
-    "When John and Mary went to the shops, John gave the bag to",
+    "When Mary and John went to the shops, John gave the bag to",
     # "When John and Mary went to the shops, Mary gave the bag to",
     # "When Tom and James went to the park, James gave the ball to",
     # "When Tom and James went to the park, Tom gave the ball to",
@@ -152,6 +152,8 @@ def nested_vmap(f, X, *Xs):
 @jax.jit
 def call_block(b, x, head_activations, q_batch, k_batch, v_batch):
     qkv = normalise_rows(x) @ b.w_qkv + b.b_qkv
+    # qkv = normalise_rows(x) * head_activations[0, :, 0, None] @ b.w_qkv + b.b_qkv
+    # head_activations = np.ones((n_batch, n_seq, n_head))
     Q, K, V = np.split(qkv, 3, axis=-1)
     sig = "batch posn (head D) -> head batch posn D"
     dims = {"batch": n_batch, "posn": n_seq, "head": n_head, "D": D}
@@ -159,14 +161,15 @@ def call_block(b, x, head_activations, q_batch, k_batch, v_batch):
     ks = einops.rearrange(K, sig, **dims)
     vs = einops.rearrange(V, sig, **dims)
 
-    def attention(batch, posn, head):
+    def attention(batch, posn, head, raw=False):
         idx = (batch, b.layer, head, posn)
         q = qs[head, q_batch[idx], posn]
         k = ks[head, k_batch[idx]]
         v = vs[head, v_batch[idx]]
+        # if raw: return np.exp(q @ k.T / np.sqrt(D)) * causal_mask[posn]
         A = np.exp(q @ k.T / np.sqrt(D)) * causal_mask[posn]
         A /= np.sum(A, axis=-1, keepdims=True)
-        return A @ v
+        return A if raw else A @ v
 
     attn = nested_vmap(
         attention, np.arange(n_batch), np.arange(n_seq), np.arange(n_head)
@@ -175,12 +178,19 @@ def call_block(b, x, head_activations, q_batch, k_batch, v_batch):
     attn *= np.repeat(head_activations, D, axis=-1)
     x += attn @ b.w_out + b.b_out
 
+    cache_attn = nested_vmap(
+        functools.partial(attention, raw=True),
+        np.arange(n_batch),
+        np.arange(n_seq),
+        np.arange(n_head),
+    )
+
     h = normalise_rows(x) @ b.w_mlp1 + b.b_mlp1
     # h *= scipy.stats.norm.cdf(h)  # gelu
     h *= (1 + erf(h / np.sqrt(2))) / 2
     x += h @ b.w_mlp2 + b.b_mlp2
 
-    return x
+    return x, cache_attn
 
 
 blocks = [new_block(layer) for layer in range(n_layer)]
@@ -191,16 +201,22 @@ warmup = True
 
 
 def gpt2(which_prompt, head_activations, q_batch, k_batch, v_batch, output_batch):
-    x = wte[prompt_tokens[which_prompt]] + wpe[:n_seq]
+    x = wte[prompt_tokens[which_prompt]] * head_activations[0, 0, :, 1, None]
+    x += wte[prompt_tokens[0][2]] * (1 - head_activations[0, 0, :, 1, None])
+    # x += wte[0] * (1 - head_activations[0, 0, :, 1, None])
+    x += wpe[:n_seq] * head_activations[0, 0, :, 2, None]
+    head_activations = np.ones((n_layer, n_batch, n_seq, n_head), dtype=np.float32)
     x = np.stack([x] * n_batch)
+    cache_attn = []
     for block in blocks:
-        x = call_block(
+        x, cache_attn_layer = call_block(
             block, x, head_activations[block.layer], q_batch, k_batch, v_batch
         )
+        cache_attn.append(cache_attn_layer)
         # assert x.mean() < 1e-5
     final = normalise_rows(x[output_batch]) * w_ln + b_ln
     logits = final @ w_unembed
-    return logits
+    return logits, cache_attn
 
 
 def softmax(x):
@@ -212,7 +228,9 @@ def softmax(x):
 def grad_logit_diff(head_activations, q_batch, k_batch, v_batch, output_batch):
     sum = 0
     for p in trange(len(prompts)):
-        logits = gpt2(p, head_activations, q_batch, k_batch, v_batch, output_batch)
+        logits, cache_attn = gpt2(
+            p, head_activations, q_batch, k_batch, v_batch, output_batch
+        )
         logits = logits[-1]
         correct, incorrect = answers[p]
         sum += (
@@ -222,11 +240,54 @@ def grad_logit_diff(head_activations, q_batch, k_batch, v_batch, output_batch):
     return sum / len(prompts)
 
 
-if __name__ == "__main__":
+@jax.grad
+def grad_attn(head_activations, q_batch, k_batch, v_batch):
+    logits, cache_attn = gpt2(0, head_activations, q_batch, k_batch, v_batch, 0)
+    layer = 5
+    head = 5
+    return cache_attn[layer][0, -5, head, 5]
+
+
+def main():
     head_activations = np.ones((n_layer, n_batch, n_seq, n_head), dtype=np.float32)
     q_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
     k_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
     v_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
+
+    logits, cache_attn = gpt2(0, head_activations, q_batch, k_batch, v_batch, 0)
+    layer = 5
+    head = 5
+    print(cache_attn[layer][0, -5, head, 5])
+    for token, amt in zip(prompt_tokens[0][1:], cache_attn[layer][0, -5, head, 1:]):
+        token = int(token)
+        if amt > 0:
+            print(
+                encoder.decode([token]),
+                end="",
+                flush=True,
+                colour="green" if amt > 0.5 else "yellow" if amt > 0.1 else "red",
+            )
+        else:
+            print(encoder.decode([token]), end="", flush=True)
+    print()
+
+    sensitivity = grad_attn(head_activations, q_batch, k_batch, v_batch).__array__()
+    sensitivity = einops.rearrange(
+        sensitivity, "layer batch posn head -> batch posn layer head"
+    )
+    for posn in range(1, n_seq):
+        print(encoder.decode([int(prompt_tokens[0][posn])]), end=" ")
+        absmax = max(np.abs(sensitivity[0, posn, :, :]).max(), 0.1)
+        for layer in range(n_layer):
+            for head in range(n_head):
+                s = np.abs(sensitivity[0, posn, layer, head]) / absmax
+                if s > 0.1:
+                    print(
+                        f"{layer}.{head} -- {sensitivity[0, posn, layer, head]:.2f}",
+                        colour="green" if s > 0.5 else "yellow" if s > 0.25 else "red",
+                    )
+        print()
+    return
 
     print("Name Mover heads", format="bold")
 
@@ -373,3 +434,7 @@ if __name__ == "__main__":
                         colour="green" if s > 0.5 else "yellow" if s > 0.25 else "red",
                     )
         print()
+
+
+if __name__ == "__main__":
+    main()
