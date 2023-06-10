@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from collections import namedtuple
+import functools
 import json
 import jax
 import jax.numpy as np
@@ -102,7 +103,21 @@ def print_top_k(probs, k):
 n_batch = 4
 
 
-TransformerBlock = namedtuple("TransformerBlock", ["layer", "b_qkv", "w_qkv", "b_out", "w_out", "b_mlp1", "w_mlp1", "b_mlp2", "w_mlp2"])
+TransformerBlock = namedtuple(
+    "TransformerBlock",
+    [
+        "layer",
+        "b_qkv",
+        "w_qkv",
+        "b_out",
+        "w_out",
+        "b_mlp1",
+        "w_mlp1",
+        "b_mlp2",
+        "w_mlp2",
+    ],
+)
+
 
 def new_block(layer):
     b_qkv = params[f"h.{layer}.attn.c_attn.bias"]
@@ -121,12 +136,23 @@ def new_block(layer):
     b_mlp2 -= b_mlp2.mean(keepdims=True)
     w_mlp2 = params[f"h.{layer}.mlp.c_proj.weight"]
     w_mlp2 -= w_mlp2.mean(axis=-1, keepdims=True)
-    return TransformerBlock(layer, b_qkv, w_qkv, b_out, w_out, b_mlp1, w_mlp1, b_mlp2, w_mlp2)
+    return TransformerBlock(
+        layer, b_qkv, w_qkv, b_out, w_out, b_mlp1, w_mlp1, b_mlp2, w_mlp2
+    )
+
 
 def attention(posn, q, k):
     A = np.exp(q @ k.T / np.sqrt(D)) * causal_mask[posn]
     A /= np.sum(A, axis=-1, keepdims=True)
     return A
+
+
+def nested_vmap(f, X, *Xs):
+    if len(Xs) == 0:
+        return jax.vmap(f)(X)
+    else:
+        return jax.vmap(lambda x: nested_vmap(functools.partial(f, x), *Xs))(X)
+
 
 @jax.jit
 def call_block(b, x, head_activations, q_batch, k_batch, v_batch):
@@ -137,18 +163,17 @@ def call_block(b, x, head_activations, q_batch, k_batch, v_batch):
     ks = einops.rearrange(K, sig, batch=n_batch, posn=n_seq, head=n_head, D=D)
     vs = einops.rearrange(V, sig, batch=n_batch, posn=n_seq, head=n_head, D=D)
     attn = einops.rearrange(
-        jax.vmap(
-            lambda batch: jax.vmap(
-                lambda posn: jax.vmap(
-                    lambda head: attention(
-                        posn,
-                        qs[head, q_batch[batch, b.layer, head, posn], posn],
-                        ks[head, k_batch[batch, b.layer, head, posn]],
-                    )
-                    @ vs[head, v_batch[batch, b.layer, head, posn]]
-                )(np.arange(n_head))
-            )(np.arange(n_seq))
-        )(np.arange(n_batch)),
+        nested_vmap(
+            lambda batch, posn, head: attention(
+                posn,
+                qs[head, q_batch[batch, b.layer, head, posn], posn],
+                ks[head, k_batch[batch, b.layer, head, posn]],
+            )
+            @ vs[head, v_batch[batch, b.layer, head, posn]],
+            np.arange(n_batch),
+            np.arange(n_seq),
+            np.arange(n_head),
+        ),
         "batch posn head D -> batch posn (head D)",
         batch=n_batch,
         posn=n_seq,
