@@ -185,7 +185,7 @@ def call_block(b, x, head_activations, q_batch, k_batch, v_batch):
     return x
 
 
-blocks = [new_block(b) for b in range(n_layer)]
+blocks = [new_block(layer) for layer in range(n_layer)]
 
 # print(jax.make_jaxpr(lambda x: blocks[0](x, np.ones((n_batch, n_seq, n_layer, n_head)), 0))(np.stack([wpe[:n_seq]] * n_batch)))
 
@@ -247,15 +247,18 @@ if __name__ == "__main__":
                         # end=" ",
                         colour="green" if s > 0.5 else "yellow" if s > 0.25 else "red",
                     )
-                if s > 0.25 and sensitivity[1, posn, layer, head] > 0:
-                    q_batch = q_batch.at[2, layer, head, posn].set(1)
+                # if s > 0.25 and sensitivity[1, posn, layer, head] > 0:
+                #     q_batch = q_batch.at[0, layer, head, posn].set(1)
         print()
 
+    q_batch = q_batch.at[0, 9, 6, -1].set(1)
+    q_batch = q_batch.at[0, 9, 9, -1].set(1)
+    q_batch = q_batch.at[0, 10, 0, -1].set(1)
     print("S-Inhibition heads", format="bold")
 
     # warmup = False
     sensitivity = grad_logit_diff(
-        head_activations, q_batch, k_batch, v_batch, 2
+        head_activations, q_batch, k_batch, v_batch, 0
     ).__array__()
     sensitivity = einops.rearrange(sensitivity, "layer batch posn head -> batch posn layer head")
     q_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
@@ -272,10 +275,14 @@ if __name__ == "__main__":
                         # end=" ",
                         colour="green" if s > 0.5 else "yellow" if s > 0.25 else "red",
                     )
-                if s > 0.25:
-                    v_batch = v_batch.at[0, layer, head, posn].set(1)
+                # if s > 0.25:
+                #     v_batch = v_batch.at[0, layer, head, posn].set(1)
         print()
 
+    v_batch = v_batch.at[0, 7, 3, -1].set(1)
+    v_batch = v_batch.at[0, 7, 9, -1].set(1)
+    v_batch = v_batch.at[0, 8, 6, -1].set(1)
+    v_batch = v_batch.at[0, 8, 10, -1].set(1)
     print("Induction heads", format="bold")
 
     sensitivity = grad_logit_diff(
@@ -296,11 +303,15 @@ if __name__ == "__main__":
                         # end=" ",
                         colour="green" if s > 0.5 else "yellow" if s > 0.25 else "red",
                     )
-                if s > 0.25:
-                    q_batch = q_batch.at[0, layer, head, posn].set(1)
-                    k_batch = k_batch.at[0, layer, head, posn].set(1)
+                # if s > 0.25:
+                #     q_batch = q_batch.at[0, layer, head, posn].set(1)
+                #     k_batch = k_batch.at[0, layer, head, posn].set(1)
         print()
 
+    q_batch = q_batch.at[0, 5, 5, -5].set(1)
+    q_batch = q_batch.at[0, 6, 9, -5].set(1)
+    q_batch = q_batch.at[0, 5, 8, -5].set(1)
+    q_batch = q_batch.at[0, 5, 9, -5].set(1)
     print("Duplicate token heads", format="bold")
 
     sensitivity = grad_logit_diff(
@@ -325,10 +336,12 @@ if __name__ == "__main__":
                         # end=" ",
                         colour="green" if s > 0.5 else "yellow" if s > 0.25 else "red",
                     )
-                # if s > 0.25:
-                #     q_batch = q_batch.at[0, layer, head, posn].set(1)
         print()
 
+    k_batch = k_batch.at[0, 5, 5, -5].set(1)
+    k_batch = k_batch.at[0, 6, 9, -5].set(1)
+    k_batch = k_batch.at[0, 5, 8, -5].set(1)
+    k_batch = k_batch.at[0, 5, 9, -5].set(1)
     print("Previous token heads", format="bold")
 
     sensitivity = grad_logit_diff(
@@ -349,6 +362,4 @@ if __name__ == "__main__":
                         # end=" ",
                         colour="green" if s > 0.5 else "yellow" if s > 0.25 else "red",
                     )
-                # if s > 0.25:
-                #     q_batch = q_batch.at[0, layer, head, posn].set(1)
         print()
