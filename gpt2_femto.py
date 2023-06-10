@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 
-import functools
+from collections import namedtuple
 import json
 import jax
 import jax.numpy as np
 from jax.scipy.special import erf
 import safetensors.numpy
-from tqdm import tqdm
 import einops
 
 from print_color import print
@@ -103,70 +102,71 @@ def print_top_k(probs, k):
 n_batch = 4
 
 
-class TransformerBlock:
-    def __init__(self, b):
-        self.layer = b
-        self.b_qkv = params[f"h.{b}.attn.c_attn.bias"]
-        self.b_qkv += params[f"h.{b}.ln_1.bias"] @ params[f"h.{b}.attn.c_attn.weight"]
-        self.w_qkv = params[f"h.{b}.attn.c_attn.weight"]
-        self.w_qkv *= params[f"h.{b}.ln_1.weight"][:, None] * np.sqrt(n_embd)
-        self.b_out = params[f"h.{b}.attn.c_proj.bias"]
-        self.b_out -= self.b_out.mean(keepdims=True)
-        self.w_out = params[f"h.{b}.attn.c_proj.weight"]
-        self.w_out -= self.w_out.mean(axis=-1, keepdims=True)
-        self.b_mlp1 = params[f"h.{b}.mlp.c_fc.bias"]
-        self.b_mlp1 += params[f"h.{b}.ln_2.bias"] @ params[f"h.{b}.mlp.c_fc.weight"]
-        self.w_mlp1 = params[f"h.{b}.mlp.c_fc.weight"]
-        self.w_mlp1 *= params[f"h.{b}.ln_2.weight"][:, None] * np.sqrt(n_embd)
-        self.b_mlp2 = params[f"h.{b}.mlp.c_proj.bias"]
-        self.b_mlp2 -= self.b_mlp2.mean(keepdims=True)
-        self.w_mlp2 = params[f"h.{b}.mlp.c_proj.weight"]
-        self.w_mlp2 -= self.w_mlp2.mean(axis=-1, keepdims=True)
+TransformerBlock = namedtuple("TransformerBlock", ["layer", "b_qkv", "w_qkv", "b_out", "w_out", "b_mlp1", "w_mlp1", "b_mlp2", "w_mlp2"])
 
-    def attention(self, posn, q, k):
-        A = np.exp(q @ k.T / np.sqrt(D)) * causal_mask[posn]
-        A /= np.sum(A, axis=-1, keepdims=True)
-        return A
+def new_block(layer):
+    b_qkv = params[f"h.{layer}.attn.c_attn.bias"]
+    b_qkv += params[f"h.{layer}.ln_1.bias"] @ params[f"h.{layer}.attn.c_attn.weight"]
+    w_qkv = params[f"h.{layer}.attn.c_attn.weight"]
+    w_qkv *= params[f"h.{layer}.ln_1.weight"][:, None] * np.sqrt(n_embd)
+    b_out = params[f"h.{layer}.attn.c_proj.bias"]
+    b_out -= b_out.mean(keepdims=True)
+    w_out = params[f"h.{layer}.attn.c_proj.weight"]
+    w_out -= w_out.mean(axis=-1, keepdims=True)
+    b_mlp1 = params[f"h.{layer}.mlp.c_fc.bias"]
+    b_mlp1 += params[f"h.{layer}.ln_2.bias"] @ params[f"h.{layer}.mlp.c_fc.weight"]
+    w_mlp1 = params[f"h.{layer}.mlp.c_fc.weight"]
+    w_mlp1 *= params[f"h.{layer}.ln_2.weight"][:, None] * np.sqrt(n_embd)
+    b_mlp2 = params[f"h.{layer}.mlp.c_proj.bias"]
+    b_mlp2 -= b_mlp2.mean(keepdims=True)
+    w_mlp2 = params[f"h.{layer}.mlp.c_proj.weight"]
+    w_mlp2 -= w_mlp2.mean(axis=-1, keepdims=True)
+    return TransformerBlock(layer, b_qkv, w_qkv, b_out, w_out, b_mlp1, w_mlp1, b_mlp2, w_mlp2)
 
-    @functools.partial(jax.jit, static_argnames=["self"])
-    def __call__(self, x, head_activations, q_batch, k_batch, v_batch):
-        qkv = normalise_rows(x) @ self.w_qkv + self.b_qkv
-        Q, K, V = np.split(qkv, 3, axis=-1)
-        sig = "batch posn (head D) -> head batch posn D"
-        qs = einops.rearrange(Q, sig, batch=n_batch, posn=n_seq, head=n_head, D=D)
-        ks = einops.rearrange(K, sig, batch=n_batch, posn=n_seq, head=n_head, D=D)
-        vs = einops.rearrange(V, sig, batch=n_batch, posn=n_seq, head=n_head, D=D)
-        attn = einops.rearrange(
-            jax.vmap(
-                lambda batch: jax.vmap(
-                    lambda posn: jax.vmap(
-                        lambda head: self.attention(
-                            posn,
-                            qs[head, q_batch[batch, self.layer, head, posn], posn],
-                            ks[head, k_batch[batch, self.layer, head, posn]],
-                        )
-                        @ vs[head, v_batch[batch, self.layer, head, posn]]
-                    )(np.arange(n_head))
-                )(np.arange(n_seq))
-            )(np.arange(n_batch)),
-            "batch posn head D -> batch posn (head D)",
-            batch=n_batch,
-            posn=n_seq,
-            head=n_head,
-            D=D,
-        )
-        attn *= np.repeat(head_activations[:, :, self.layer, :], D, axis=-1)
-        x += attn @ self.w_out + self.b_out
+def attention(posn, q, k):
+    A = np.exp(q @ k.T / np.sqrt(D)) * causal_mask[posn]
+    A /= np.sum(A, axis=-1, keepdims=True)
+    return A
 
-        h = normalise_rows(x) @ self.w_mlp1 + self.b_mlp1
-        # h *= scipy.stats.norm.cdf(h)  # gelu
-        h *= (1 + erf(h / np.sqrt(2))) / 2
-        x += h @ self.w_mlp2 + self.b_mlp2
+@jax.jit
+def call_block(b, x, head_activations, q_batch, k_batch, v_batch):
+    qkv = normalise_rows(x) @ b.w_qkv + b.b_qkv
+    Q, K, V = np.split(qkv, 3, axis=-1)
+    sig = "batch posn (head D) -> head batch posn D"
+    qs = einops.rearrange(Q, sig, batch=n_batch, posn=n_seq, head=n_head, D=D)
+    ks = einops.rearrange(K, sig, batch=n_batch, posn=n_seq, head=n_head, D=D)
+    vs = einops.rearrange(V, sig, batch=n_batch, posn=n_seq, head=n_head, D=D)
+    attn = einops.rearrange(
+        jax.vmap(
+            lambda batch: jax.vmap(
+                lambda posn: jax.vmap(
+                    lambda head: attention(
+                        posn,
+                        qs[head, q_batch[batch, b.layer, head, posn], posn],
+                        ks[head, k_batch[batch, b.layer, head, posn]],
+                    )
+                    @ vs[head, v_batch[batch, b.layer, head, posn]]
+                )(np.arange(n_head))
+            )(np.arange(n_seq))
+        )(np.arange(n_batch)),
+        "batch posn head D -> batch posn (head D)",
+        batch=n_batch,
+        posn=n_seq,
+        head=n_head,
+        D=D,
+    )
+    attn *= np.repeat(head_activations[:, :, b.layer, :], D, axis=-1)
+    x += attn @ b.w_out + b.b_out
 
-        return x
+    h = normalise_rows(x) @ b.w_mlp1 + b.b_mlp1
+    # h *= scipy.stats.norm.cdf(h)  # gelu
+    h *= (1 + erf(h / np.sqrt(2))) / 2
+    x += h @ b.w_mlp2 + b.b_mlp2
+
+    return x
 
 
-blocks = [TransformerBlock(b) for b in range(n_layer)]
+blocks = [new_block(b) for b in range(n_layer)]
 
 # print(jax.make_jaxpr(lambda x: blocks[0](x, np.ones((n_batch, n_seq, n_layer, n_head)), 0))(np.stack([wpe[:n_seq]] * n_batch)))
 
@@ -176,8 +176,8 @@ warmup = True
 def gpt2(which_prompt, head_activations, q_batch, k_batch, v_batch, output_batch):
     x = wte[prompt_tokens[which_prompt]] + wpe[:n_seq]
     x = np.stack([x] * n_batch)
-    for block in tqdm(blocks) if warmup else blocks:
-        x = block(x, head_activations, q_batch, k_batch, v_batch)
+    for block in blocks:
+        x = call_block(block, x, head_activations, q_batch, k_batch, v_batch)
         # assert x.mean() < 1e-5
     final = normalise_rows(x[output_batch]) * w_ln + b_ln
     logits = final @ w_unembed
