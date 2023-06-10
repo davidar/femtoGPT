@@ -174,7 +174,7 @@ def call_block(b, x, head_activations, q_batch, k_batch, v_batch):
         head=n_head,
         D=D,
     )
-    attn *= np.repeat(head_activations[:, :, b.layer, :], D, axis=-1)
+    attn *= np.repeat(head_activations, D, axis=-1)
     x += attn @ b.w_out + b.b_out
 
     h = normalise_rows(x) @ b.w_mlp1 + b.b_mlp1
@@ -196,7 +196,7 @@ def gpt2(which_prompt, head_activations, q_batch, k_batch, v_batch, output_batch
     x = wte[prompt_tokens[which_prompt]] + wpe[:n_seq]
     x = np.stack([x] * n_batch)
     for block in blocks:
-        x = call_block(block, x, head_activations, q_batch, k_batch, v_batch)
+        x = call_block(block, x, head_activations[block.layer], q_batch, k_batch, v_batch)
         # assert x.mean() < 1e-5
     final = normalise_rows(x[output_batch]) * w_ln + b_ln
     logits = final @ w_unembed
@@ -223,7 +223,7 @@ def grad_logit_diff(head_activations, q_batch, k_batch, v_batch, output_batch):
 
 
 if __name__ == "__main__":
-    head_activations = np.ones((n_batch, n_seq, n_layer, n_head), dtype=np.float32)
+    head_activations = np.ones((n_layer, n_batch, n_seq, n_head), dtype=np.float32)
     q_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
     k_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
     v_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
@@ -233,6 +233,7 @@ if __name__ == "__main__":
     sensitivity = grad_logit_diff(
         head_activations, q_batch, k_batch, v_batch, 1
     ).__array__()
+    sensitivity = einops.rearrange(sensitivity, "layer batch posn head -> batch posn layer head")
 
     for posn in range(1, n_seq):
         print(encoder.decode([int(prompt_tokens[0][posn])]), end=" ")
@@ -256,6 +257,7 @@ if __name__ == "__main__":
     sensitivity = grad_logit_diff(
         head_activations, q_batch, k_batch, v_batch, 2
     ).__array__()
+    sensitivity = einops.rearrange(sensitivity, "layer batch posn head -> batch posn layer head")
     q_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
 
     for posn in range(1, n_seq):
@@ -279,6 +281,7 @@ if __name__ == "__main__":
     sensitivity = grad_logit_diff(
         head_activations, q_batch, k_batch, v_batch, 0
     ).__array__()
+    sensitivity = einops.rearrange(sensitivity, "layer batch posn head -> batch posn layer head")
     v_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
 
     for posn in range(1, n_seq):
@@ -307,6 +310,7 @@ if __name__ == "__main__":
         v_batch,
         0,
     ).__array__()
+    sensitivity = einops.rearrange(sensitivity, "layer batch posn head -> batch posn layer head")
     q_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
 
     for posn in range(1, n_seq):
@@ -330,6 +334,7 @@ if __name__ == "__main__":
     sensitivity = grad_logit_diff(
         head_activations, q_batch, k_batch, v_batch, 0
     ).__array__()
+    sensitivity = einops.rearrange(sensitivity, "layer batch posn head -> batch posn layer head")
     k_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
 
     for posn in range(1, n_seq):
