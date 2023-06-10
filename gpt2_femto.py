@@ -8,6 +8,7 @@ import jax.numpy as np
 from jax.scipy.special import erf
 import safetensors.numpy
 import einops
+from tqdm import trange
 
 from print_color import print
 
@@ -50,23 +51,23 @@ force_enable_layers = 0
 
 prompts = [
     "When John and Mary went to the shops, John gave the bag to",
-    "When John and Mary went to the shops, Mary gave the bag to",
-    "When Tom and James went to the park, James gave the ball to",
-    "When Tom and James went to the park, Tom gave the ball to",
-    "When Dan and Sid went to the shops, Sid gave an apple to",
-    "When Dan and Sid went to the shops, Dan gave an apple to",
-    "After Martin and Amy went to the park, Amy gave a drink to",
-    "After Martin and Amy went to the park, Martin gave a drink to",
+    # "When John and Mary went to the shops, Mary gave the bag to",
+    # "When Tom and James went to the park, James gave the ball to",
+    # "When Tom and James went to the park, Tom gave the ball to",
+    # "When Dan and Sid went to the shops, Sid gave an apple to",
+    # "When Dan and Sid went to the shops, Dan gave an apple to",
+    # "After Martin and Amy went to the park, Amy gave a drink to",
+    # "After Martin and Amy went to the park, Martin gave a drink to",
 ]
 answers = [
     (" Mary", " John"),
-    (" John", " Mary"),
-    (" Tom", " James"),
-    (" James", " Tom"),
-    (" Dan", " Sid"),
-    (" Sid", " Dan"),
-    (" Martin", " Amy"),
-    (" Amy", " Martin"),
+    # (" John", " Mary"),
+    # (" Tom", " James"),
+    # (" James", " Tom"),
+    # (" Dan", " Sid"),
+    # (" Sid", " Dan"),
+    # (" Martin", " Amy"),
+    # (" Amy", " Martin"),
 ]
 
 prompt_tokens = [np.array([50256] + encoder.encode(s), dtype=np.int32) for s in prompts]
@@ -153,9 +154,10 @@ def call_block(b, x, head_activations, q_batch, k_batch, v_batch):
     qkv = normalise_rows(x) @ b.w_qkv + b.b_qkv
     Q, K, V = np.split(qkv, 3, axis=-1)
     sig = "batch posn (head D) -> head batch posn D"
-    qs = einops.rearrange(Q, sig, batch=n_batch, posn=n_seq, head=n_head, D=D)
-    ks = einops.rearrange(K, sig, batch=n_batch, posn=n_seq, head=n_head, D=D)
-    vs = einops.rearrange(V, sig, batch=n_batch, posn=n_seq, head=n_head, D=D)
+    dims = {"batch": n_batch, "posn": n_seq, "head": n_head, "D": D}
+    qs = einops.rearrange(Q, sig, **dims)
+    ks = einops.rearrange(K, sig, **dims)
+    vs = einops.rearrange(V, sig, **dims)
 
     def attention(batch, posn, head):
         idx = (batch, b.layer, head, posn)
@@ -166,14 +168,10 @@ def call_block(b, x, head_activations, q_batch, k_batch, v_batch):
         A /= np.sum(A, axis=-1, keepdims=True)
         return A @ v
 
-    attn = einops.rearrange(
-        nested_vmap(attention, np.arange(n_batch), np.arange(n_seq), np.arange(n_head)),
-        "batch posn head D -> batch posn (head D)",
-        batch=n_batch,
-        posn=n_seq,
-        head=n_head,
-        D=D,
+    attn = nested_vmap(
+        attention, np.arange(n_batch), np.arange(n_seq), np.arange(n_head)
     )
+    attn = einops.rearrange(attn, "batch posn head D -> batch posn (head D)", **dims)
     attn *= np.repeat(head_activations, D, axis=-1)
     x += attn @ b.w_out + b.b_out
 
@@ -196,7 +194,9 @@ def gpt2(which_prompt, head_activations, q_batch, k_batch, v_batch, output_batch
     x = wte[prompt_tokens[which_prompt]] + wpe[:n_seq]
     x = np.stack([x] * n_batch)
     for block in blocks:
-        x = call_block(block, x, head_activations[block.layer], q_batch, k_batch, v_batch)
+        x = call_block(
+            block, x, head_activations[block.layer], q_batch, k_batch, v_batch
+        )
         # assert x.mean() < 1e-5
     final = normalise_rows(x[output_batch]) * w_ln + b_ln
     logits = final @ w_unembed
@@ -211,7 +211,7 @@ def softmax(x):
 @jax.grad
 def grad_logit_diff(head_activations, q_batch, k_batch, v_batch, output_batch):
     sum = 0
-    for p in range(len(prompts)):
+    for p in trange(len(prompts)):
         logits = gpt2(p, head_activations, q_batch, k_batch, v_batch, output_batch)
         logits = logits[-1]
         correct, incorrect = answers[p]
@@ -233,7 +233,9 @@ if __name__ == "__main__":
     sensitivity = grad_logit_diff(
         head_activations, q_batch, k_batch, v_batch, 1
     ).__array__()
-    sensitivity = einops.rearrange(sensitivity, "layer batch posn head -> batch posn layer head")
+    sensitivity = einops.rearrange(
+        sensitivity, "layer batch posn head -> batch posn layer head"
+    )
 
     for posn in range(1, n_seq):
         print(encoder.decode([int(prompt_tokens[0][posn])]), end=" ")
@@ -260,7 +262,9 @@ if __name__ == "__main__":
     sensitivity = grad_logit_diff(
         head_activations, q_batch, k_batch, v_batch, 0
     ).__array__()
-    sensitivity = einops.rearrange(sensitivity, "layer batch posn head -> batch posn layer head")
+    sensitivity = einops.rearrange(
+        sensitivity, "layer batch posn head -> batch posn layer head"
+    )
     q_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
 
     for posn in range(1, n_seq):
@@ -288,7 +292,9 @@ if __name__ == "__main__":
     sensitivity = grad_logit_diff(
         head_activations, q_batch, k_batch, v_batch, 0
     ).__array__()
-    sensitivity = einops.rearrange(sensitivity, "layer batch posn head -> batch posn layer head")
+    sensitivity = einops.rearrange(
+        sensitivity, "layer batch posn head -> batch posn layer head"
+    )
     v_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
 
     for posn in range(1, n_seq):
@@ -321,7 +327,9 @@ if __name__ == "__main__":
         v_batch,
         0,
     ).__array__()
-    sensitivity = einops.rearrange(sensitivity, "layer batch posn head -> batch posn layer head")
+    sensitivity = einops.rearrange(
+        sensitivity, "layer batch posn head -> batch posn layer head"
+    )
     q_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
 
     for posn in range(1, n_seq):
@@ -347,7 +355,9 @@ if __name__ == "__main__":
     sensitivity = grad_logit_diff(
         head_activations, q_batch, k_batch, v_batch, 0
     ).__array__()
-    sensitivity = einops.rearrange(sensitivity, "layer batch posn head -> batch posn layer head")
+    sensitivity = einops.rearrange(
+        sensitivity, "layer batch posn head -> batch posn layer head"
+    )
     k_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
 
     for posn in range(1, n_seq):
