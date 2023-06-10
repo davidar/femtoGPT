@@ -99,7 +99,7 @@ def print_top_k(probs, k):
     print()
 
 
-n_batch = 3
+n_batch = 4
 
 
 class TransformerBlock:
@@ -135,18 +135,19 @@ class TransformerBlock:
         ks = np.split(K, n_head, axis=-1)
         vs = np.split(V, n_head, axis=-1)
         attn = jax.vmap(
-            lambda batch: np.hstack(
+            lambda batch: np.concatenate(
                 [
                     jax.vmap(
                         lambda posn: self.attention(
                             posn,
                             qs[head][q_batch[batch, self.layer, head, posn], posn],
-                            ks[head][0],
+                            ks[head][k_batch[batch, self.layer, head, posn]],
                         )
-                        @ vs[head][0]
+                        @ vs[head][v_batch[batch, self.layer, head, posn]]
                     )(np.arange(n_seq))
                     for head in range(n_head)
-                ]
+                ],
+                axis=-1,
             )
         )(np.arange(n_batch))
         attn *= np.repeat(head_activations[:, :, self.layer, :], D, axis=-1)
@@ -245,80 +246,80 @@ if __name__ == "__main__":
                         # end=" ",
                         colour="green" if s > 0.5 else "yellow" if s > 0.25 else "red",
                     )
-                # if s > 0.25:
-                #     v_batch = v_batch.at[0, layer, head, posn].set(1)
+                if s > 0.25:
+                    v_batch = v_batch.at[0, layer, head, posn].set(1)
         print()
 
-    # print("Induction heads", format="bold")
+    print("Induction heads", format="bold")
 
-    # sensitivity = grad_logit_diff(
-    #     head_activations, q_batch, k_batch, v_batch, 0
-    # ).__array__()
-    # v_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
+    sensitivity = grad_logit_diff(
+        head_activations, q_batch, k_batch, v_batch, 0
+    ).__array__()
+    v_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
 
-    # for posn in range(1, n_seq):
-    #     print(encoder.decode([int(prompt_tokens[0][posn])]), end=" ")
-    #     absmax = max(np.abs(sensitivity[1, posn, :, :]).max(), 0.2)
-    #     for layer in range(n_layer):
-    #         for head in range(n_head):
-    #             s = np.abs(sensitivity[1, posn, layer, head]) / absmax
-    #             if s > 0.1:
-    #                 print(
-    #                     f"{layer}.{head} -- {sensitivity[1, posn, layer, head]:.2f}",
-    #                     # end=" ",
-    #                     colour="green" if s > 0.5 else "yellow" if s > 0.25 else "red",
-    #                 )
-    #             if s > 0.25:
-    #                 q_batch = q_batch.at[0, layer, head, posn].set(1)
-    #                 k_batch = k_batch.at[0, layer, head, posn].set(1)
-    #     print()
+    for posn in range(1, n_seq):
+        print(encoder.decode([int(prompt_tokens[0][posn])]), end=" ")
+        absmax = max(np.abs(sensitivity[1, posn, :, :]).max(), 0.2)
+        for layer in range(n_layer):
+            for head in range(n_head):
+                s = np.abs(sensitivity[1, posn, layer, head]) / absmax
+                if s > 0.1:
+                    print(
+                        f"{layer}.{head} -- {sensitivity[1, posn, layer, head]:.2f}",
+                        # end=" ",
+                        colour="green" if s > 0.5 else "yellow" if s > 0.25 else "red",
+                    )
+                if s > 0.25:
+                    q_batch = q_batch.at[0, layer, head, posn].set(1)
+                    k_batch = k_batch.at[0, layer, head, posn].set(1)
+        print()
 
-    # print("Duplicate token heads", format="bold")
+    print("Duplicate token heads", format="bold")
 
-    # sensitivity = grad_logit_diff(
-    #     head_activations,
-    #     q_batch,
-    #     np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32),
-    #     v_batch,
-    #     0,
-    # ).__array__()
-    # q_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
+    sensitivity = grad_logit_diff(
+        head_activations,
+        q_batch,
+        np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32),
+        v_batch,
+        0,
+    ).__array__()
+    q_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
 
-    # for posn in range(1, n_seq):
-    #     print(encoder.decode([int(prompt_tokens[0][posn])]), end=" ")
-    #     absmax = max(np.abs(sensitivity[1, posn, :, :]).max(), 0.2)
-    #     for layer in range(n_layer):
-    #         for head in range(n_head):
-    #             s = np.abs(sensitivity[1, posn, layer, head]) / absmax
-    #             if s > 0.1:
-    #                 print(
-    #                     f"{layer}.{head} -- {sensitivity[1, posn, layer, head]:.2f}",
-    #                     # end=" ",
-    #                     colour="green" if s > 0.5 else "yellow" if s > 0.25 else "red",
-    #                 )
-    #             # if s > 0.25:
-    #             #     q_batch = q_batch.at[0, layer, head, posn].set(1)
-    #     print()
+    for posn in range(1, n_seq):
+        print(encoder.decode([int(prompt_tokens[0][posn])]), end=" ")
+        absmax = max(np.abs(sensitivity[1, posn, :, :]).max(), 0.2)
+        for layer in range(n_layer):
+            for head in range(n_head):
+                s = np.abs(sensitivity[1, posn, layer, head]) / absmax
+                if s > 0.1:
+                    print(
+                        f"{layer}.{head} -- {sensitivity[1, posn, layer, head]:.2f}",
+                        # end=" ",
+                        colour="green" if s > 0.5 else "yellow" if s > 0.25 else "red",
+                    )
+                # if s > 0.25:
+                #     q_batch = q_batch.at[0, layer, head, posn].set(1)
+        print()
 
-    # print("Previous token heads", format="bold")
+    print("Previous token heads", format="bold")
 
-    # sensitivity = grad_logit_diff(
-    #     head_activations, q_batch, k_batch, v_batch, 0
-    # ).__array__()
-    # k_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
+    sensitivity = grad_logit_diff(
+        head_activations, q_batch, k_batch, v_batch, 0
+    ).__array__()
+    k_batch = np.zeros((n_batch, n_layer, n_head, n_seq), dtype=np.int32)
 
-    # for posn in range(1, n_seq):
-    #     print(encoder.decode([int(prompt_tokens[0][posn])]), end=" ")
-    #     absmax = max(np.abs(sensitivity[1, posn, :, :]).max(), 0.2)
-    #     for layer in range(n_layer):
-    #         for head in range(n_head):
-    #             s = np.abs(sensitivity[1, posn, layer, head]) / absmax
-    #             if s > 0.1:
-    #                 print(
-    #                     f"{layer}.{head} -- {sensitivity[1, posn, layer, head]:.2f}",
-    #                     # end=" ",
-    #                     colour="green" if s > 0.5 else "yellow" if s > 0.25 else "red",
-    #                 )
-    #             # if s > 0.25:
-    #             #     q_batch = q_batch.at[0, layer, head, posn].set(1)
-    #     print()
+    for posn in range(1, n_seq):
+        print(encoder.decode([int(prompt_tokens[0][posn])]), end=" ")
+        absmax = max(np.abs(sensitivity[1, posn, :, :]).max(), 0.2)
+        for layer in range(n_layer):
+            for head in range(n_head):
+                s = np.abs(sensitivity[1, posn, layer, head]) / absmax
+                if s > 0.1:
+                    print(
+                        f"{layer}.{head} -- {sensitivity[1, posn, layer, head]:.2f}",
+                        # end=" ",
+                        colour="green" if s > 0.5 else "yellow" if s > 0.25 else "red",
+                    )
+                # if s > 0.25:
+                #     q_batch = q_batch.at[0, layer, head, posn].set(1)
+        print()
