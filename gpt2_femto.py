@@ -136,24 +136,25 @@ class TransformerBlock:
         qs = einops.rearrange(Q, sig, batch=n_batch, posn=n_seq, head=n_head, D=D)
         ks = einops.rearrange(K, sig, batch=n_batch, posn=n_seq, head=n_head, D=D)
         vs = einops.rearrange(V, sig, batch=n_batch, posn=n_seq, head=n_head, D=D)
-        attn = jax.vmap(
-            lambda batch: einops.rearrange(
-                jax.vmap(
-                    lambda head: jax.vmap(
-                        lambda posn: self.attention(
+        attn = einops.rearrange(
+            jax.vmap(
+                lambda batch: jax.vmap(
+                    lambda posn: jax.vmap(
+                        lambda head: self.attention(
                             posn,
                             qs[head, q_batch[batch, self.layer, head, posn], posn],
                             ks[head, k_batch[batch, self.layer, head, posn]],
                         )
                         @ vs[head, v_batch[batch, self.layer, head, posn]]
-                    )(np.arange(n_seq))
-                )(np.arange(n_head)),
-                "head posn D -> posn (head D)",
-                head=n_head,
-                posn=n_seq,
-                D=D,
-            )
-        )(np.arange(n_batch))
+                    )(np.arange(n_head))
+                )(np.arange(n_seq))
+            )(np.arange(n_batch)),
+            "batch posn head D -> batch posn (head D)",
+            batch=n_batch,
+            posn=n_seq,
+            head=n_head,
+            D=D,
+        )
         attn *= np.repeat(head_activations[:, :, self.layer, :], D, axis=-1)
         x += attn @ self.w_out + self.b_out
 
