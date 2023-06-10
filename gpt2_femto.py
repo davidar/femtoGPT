@@ -7,6 +7,7 @@ import jax.numpy as np
 from jax.scipy.special import erf
 import safetensors.numpy
 from tqdm import tqdm
+import einops
 
 from print_color import print
 
@@ -131,24 +132,21 @@ class TransformerBlock:
     def __call__(self, x, head_activations, q_batch, k_batch, v_batch):
         qkv = normalise_rows(x) @ self.w_qkv + self.b_qkv
         Q, K, V = np.split(qkv, 3, axis=-1)
-        qs = np.split(Q, n_head, axis=-1)
-        ks = np.split(K, n_head, axis=-1)
-        vs = np.split(V, n_head, axis=-1)
+        qs = einops.rearrange(Q, 'batch posn (head D) -> head batch posn D', batch=n_batch, posn=n_seq, head=n_head, D=D)
+        ks = einops.rearrange(K, 'batch posn (head D) -> head batch posn D', batch=n_batch, posn=n_seq, head=n_head, D=D)
+        vs = einops.rearrange(V, 'batch posn (head D) -> head batch posn D', batch=n_batch, posn=n_seq, head=n_head, D=D)
         attn = jax.vmap(
-            lambda batch: np.concatenate(
-                [
+            lambda batch: einops.rearrange(jax.vmap(
+                lambda head:
                     jax.vmap(
                         lambda posn: self.attention(
                             posn,
-                            qs[head][q_batch[batch, self.layer, head, posn], posn],
-                            ks[head][k_batch[batch, self.layer, head, posn]],
+                            qs[head, q_batch[batch, self.layer, head, posn], posn],
+                            ks[head, k_batch[batch, self.layer, head, posn]],
                         )
-                        @ vs[head][v_batch[batch, self.layer, head, posn]]
+                        @ vs[head, v_batch[batch, self.layer, head, posn]]
                     )(np.arange(n_seq))
-                    for head in range(n_head)
-                ],
-                axis=-1,
-            )
+            )(np.arange(n_head)), 'head posn D -> posn (head D)', head=n_head, posn=n_seq, D=D)
         )(np.arange(n_batch))
         attn *= np.repeat(head_activations[:, :, self.layer, :], D, axis=-1)
         x += attn @ self.w_out + self.b_out
