@@ -201,11 +201,11 @@ warmup = True
 
 
 def gpt2(which_prompt, head_activations, q_batch, k_batch, v_batch, output_batch):
-    x = wte[prompt_tokens[which_prompt]] * head_activations[0, 0, :, 1, None]
-    x += wte[prompt_tokens[0][2]] * (1 - head_activations[0, 0, :, 1, None])
+    x = wte[prompt_tokens[which_prompt]] #* head_activations[0, 0, :, 1, None]
+    # x += wte[prompt_tokens[0][2]] * (1 - head_activations[0, 0, :, 1, None])
     # x += wte[0] * (1 - head_activations[0, 0, :, 1, None])
     x += wpe[:n_seq] * head_activations[0, 0, :, 2, None]
-    head_activations = np.ones((n_layer, n_batch, n_seq, n_head), dtype=np.float32)
+    # head_activations = np.ones((n_layer, n_batch, n_seq, n_head), dtype=np.float32)
     x = np.stack([x] * n_batch)
     cache_attn = []
     for block in blocks:
@@ -271,19 +271,20 @@ def main():
             print(encoder.decode([token]), end="", flush=True)
     print()
 
+    v_batch = v_batch.at[0, :, :, -5].set(1)
     sensitivity = grad_attn(head_activations, q_batch, k_batch, v_batch).__array__()
     sensitivity = einops.rearrange(
         sensitivity, "layer batch posn head -> batch posn layer head"
     )
     for posn in range(1, n_seq):
         print(encoder.decode([int(prompt_tokens[0][posn])]), end=" ")
-        absmax = max(np.abs(sensitivity[0, posn, :, :]).max(), 0.1)
+        absmax = max(np.abs(sensitivity[1, posn, :, :]).max(), 0.1)
         for layer in range(n_layer):
             for head in range(n_head):
-                s = np.abs(sensitivity[0, posn, layer, head]) / absmax
+                s = np.abs(sensitivity[1, posn, layer, head]) / absmax
                 if s > 0.1:
                     print(
-                        f"{layer}.{head} -- {sensitivity[0, posn, layer, head]:.2f}",
+                        f"{layer}.{head} -- {sensitivity[1, posn, layer, head]:.2f}",
                         colour="green" if s > 0.5 else "yellow" if s > 0.25 else "red",
                     )
         print()
