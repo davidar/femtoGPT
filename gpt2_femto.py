@@ -132,13 +132,14 @@ class TransformerBlock:
     def __call__(self, x, head_activations, q_batch, k_batch, v_batch):
         qkv = normalise_rows(x) @ self.w_qkv + self.b_qkv
         Q, K, V = np.split(qkv, 3, axis=-1)
-        qs = einops.rearrange(Q, 'batch posn (head D) -> head batch posn D', batch=n_batch, posn=n_seq, head=n_head, D=D)
-        ks = einops.rearrange(K, 'batch posn (head D) -> head batch posn D', batch=n_batch, posn=n_seq, head=n_head, D=D)
-        vs = einops.rearrange(V, 'batch posn (head D) -> head batch posn D', batch=n_batch, posn=n_seq, head=n_head, D=D)
+        sig = "batch posn (head D) -> head batch posn D"
+        qs = einops.rearrange(Q, sig, batch=n_batch, posn=n_seq, head=n_head, D=D)
+        ks = einops.rearrange(K, sig, batch=n_batch, posn=n_seq, head=n_head, D=D)
+        vs = einops.rearrange(V, sig, batch=n_batch, posn=n_seq, head=n_head, D=D)
         attn = jax.vmap(
-            lambda batch: einops.rearrange(jax.vmap(
-                lambda head:
-                    jax.vmap(
+            lambda batch: einops.rearrange(
+                jax.vmap(
+                    lambda head: jax.vmap(
                         lambda posn: self.attention(
                             posn,
                             qs[head, q_batch[batch, self.layer, head, posn], posn],
@@ -146,7 +147,12 @@ class TransformerBlock:
                         )
                         @ vs[head, v_batch[batch, self.layer, head, posn]]
                     )(np.arange(n_seq))
-            )(np.arange(n_head)), 'head posn D -> posn (head D)', head=n_head, posn=n_seq, D=D)
+                )(np.arange(n_head)),
+                "head posn D -> posn (head D)",
+                head=n_head,
+                posn=n_seq,
+                D=D,
+            )
         )(np.arange(n_batch))
         attn *= np.repeat(head_activations[:, :, self.layer, :], D, axis=-1)
         x += attn @ self.w_out + self.b_out
