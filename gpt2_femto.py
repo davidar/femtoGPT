@@ -7,6 +7,8 @@ import jax.experimental.compilation_cache.compilation_cache
 import jax.numpy as np
 from jax.scipy.special import erf
 import einops
+import tensorflow as tf
+import tensorflowjs as tfjs
 
 from print_color import print
 
@@ -26,7 +28,7 @@ encoder = get_encoder("", "")
 
 config = json.loads(open("models/gpt2/config.json").read())
 n_vocab = config["vocab_size"]
-n_ctx = config["n_ctx"]
+n_ctx = 64  # config["n_ctx"]
 n_embd = config["n_embd"]
 n_head = config["n_head"]
 n_layer = config["n_layer"]
@@ -112,9 +114,11 @@ def call_block(b, x):
     return x, cache_attn
 
 
-def gpt2(params, prompt_tokens, output_batch=0):
-    n_seq = prompt_tokens.shape[0]
-    x = params.wte[prompt_tokens] + params.wpe[:n_seq]
+def gpt2(params, tokens):
+    output_batch = 0
+    n_seq = n_ctx  # tokens.shape[0]
+    x = params.wte[tokens]
+    x += params.wpe[:n_seq]
     x = np.stack([x] * n_batch)
     cache_attn = []
     for block in params.blocks:
@@ -123,11 +127,18 @@ def gpt2(params, prompt_tokens, output_batch=0):
         # assert x.mean() < 1e-5
     final = normalise_rows(x[output_batch]) * params.w_ln + params.b_ln
     logits = final @ params.w_unembed
-    return logits, cache_attn
+    return logits, np.stack(cache_attn)
 
 
 def main():
     params = load_gpt2()
+    tfjs.converters.convert_jax(
+        gpt2,
+        params,
+        input_signatures=[tf.TensorSpec((n_ctx,), tf.int32)],
+        model_dir="tfjs_model",
+    )
+
     prompt_tokens = encoder.encode(
         "Alan Turing theorized that computers would one day become"
     )
@@ -137,7 +148,7 @@ def main():
     assert total < n_ctx
     for posn in range(len(prompt_tokens) - 1, total):
         logits, cache_attn = gpt2(
-            params, np.array(tokens + [n_vocab - 1] * (total - len(tokens)))
+            params, np.array(tokens + [n_vocab - 1] * (n_ctx - len(tokens)))
         )
         logits = logits[posn]
         token = int(np.argmax(logits))

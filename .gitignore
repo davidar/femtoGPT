@@ -1,6 +1,7 @@
 ### Project ###
 /models/
 /jax_cache/
+/tfjs_model/
 
 
 ### Python ###

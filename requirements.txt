@@ -1,7 +1,5 @@
-numpy==1.24.1 # used for the actual model code/weights
-regex==2017.4.5 # used by the bpe tokenizer
-requests==2.27.1 # used to download gpt-2 files from openai
-fire==0.5.0 # easy CLI creation
+regex==2017.4.5
+requests==2.27.1
 
 scipy==1.10.1
 
@@ -11,6 +9,8 @@ safetensors==0.3.1
 print-color==0.4.6
 tqdm==4.65.0
 einops==0.6.1
+
+tensorflowjs==4.7.0
 
 -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 jax[cuda12_pip]==0.4.11
