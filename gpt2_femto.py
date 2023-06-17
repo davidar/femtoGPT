@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 
-from collections import namedtuple
 import functools
 import json
 import jax
 import jax.experimental.compilation_cache.compilation_cache
 import jax.numpy as np
 from jax.scipy.special import erf
-import safetensors.flax
 import einops
-from tqdm import trange
 
 from print_color import print
 
@@ -20,6 +17,7 @@ from gpt2_weights import load_gpt2
 # hf_hub_download("gpt2", "config.json", local_dir="models/gpt2")
 # hf_hub_download("gpt2", "model.safetensors", local_dir="models/gpt2")
 
+# jax.config.update("jax_debug_nans", True)
 # jax.config.update("jax_log_compiles", True)
 
 jax.experimental.compilation_cache.compilation_cache.initialize_cache("jax_cache")
@@ -86,9 +84,10 @@ def call_block(b, x):
 
     def attention(batch, posn, head, raw=False):
         q = qs[head, batch, posn]
-        k = ks[head, batch]
-        v = vs[head, batch]
-        A = np.exp(q @ k.T / np.sqrt(D)) * causal_mask[posn]
+        k = ks[head, batch] * causal_mask[posn, :, None]
+        v = vs[head, batch] * causal_mask[posn, :, None]
+        A = causal_mask[posn]
+        A *= np.exp(q @ k.T / np.sqrt(D))
         A /= np.sum(A, axis=-1, keepdims=True)
         return A if raw else A @ v
 
@@ -137,7 +136,9 @@ def main():
     total = len(tokens) + 40
     assert total < n_ctx
     for posn in range(len(prompt_tokens) - 1, total):
-        logits, cache_attn = gpt2(params, np.array(tokens + [0] * (total - len(tokens))))
+        logits, cache_attn = gpt2(
+            params, np.array(tokens + [n_vocab - 1] * (total - len(tokens)))
+        )
         logits = logits[posn]
         token = int(np.argmax(logits))
 
