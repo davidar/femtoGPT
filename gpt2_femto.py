@@ -14,6 +14,7 @@ from tqdm import trange
 from print_color import print
 
 from encoder import get_encoder
+from gpt2_weights import load_gpt2
 
 # from huggingface_hub import hf_hub_download
 # hf_hub_download("gpt2", "config.json", local_dir="models/gpt2")
@@ -24,27 +25,15 @@ from encoder import get_encoder
 jax.experimental.compilation_cache.compilation_cache.initialize_cache("jax_cache")
 
 encoder = get_encoder("", "")
-hparams = json.loads(open("models/gpt2/config.json").read())
 
-n_vocab = hparams["vocab_size"]
-n_ctx = hparams["n_ctx"]
-n_embd = hparams["n_embd"]
-n_head = hparams["n_head"]
-n_layer = hparams["n_layer"]
+config = json.loads(open("models/gpt2/config.json").read())
+n_vocab = config["vocab_size"]
+n_ctx = config["n_ctx"]
+n_embd = config["n_embd"]
+n_head = config["n_head"]
+n_layer = config["n_layer"]
 D = int(n_embd / n_head)
-
-params = safetensors.flax.load_file("models/gpt2/model.safetensors")
-
-wte = params["wte.weight"]
-wpe = params["wpe.weight"]
-w_ln = params["ln_f.weight"] * np.sqrt(n_embd)
-b_ln = params["ln_f.bias"]
-
-# centering
-w_unembed = wte.T.copy()
-w_unembed -= w_unembed.mean(axis=-1, keepdims=True)
-wte -= wte.mean(axis=-1, keepdims=True)
-wpe -= wpe.mean(axis=-1, keepdims=True)
+n_batch = 1
 
 
 def normalise_rows(x):
@@ -69,45 +58,9 @@ def print_top_k(probs, k):
     print()
 
 
-n_batch = 1
-
-
-TransformerBlock = namedtuple(
-    "TransformerBlock",
-    [
-        "layer",
-        "b_qkv",
-        "w_qkv",
-        "b_out",
-        "w_out",
-        "b_mlp1",
-        "w_mlp1",
-        "b_mlp2",
-        "w_mlp2",
-    ],
-)
-
-
-def new_block(layer):
-    b_qkv = params[f"h.{layer}.attn.c_attn.bias"]
-    b_qkv += params[f"h.{layer}.ln_1.bias"] @ params[f"h.{layer}.attn.c_attn.weight"]
-    w_qkv = params[f"h.{layer}.attn.c_attn.weight"]
-    w_qkv *= params[f"h.{layer}.ln_1.weight"][:, None] * np.sqrt(n_embd)
-    b_out = params[f"h.{layer}.attn.c_proj.bias"]
-    b_out -= b_out.mean(keepdims=True)
-    w_out = params[f"h.{layer}.attn.c_proj.weight"]
-    w_out -= w_out.mean(axis=-1, keepdims=True)
-    b_mlp1 = params[f"h.{layer}.mlp.c_fc.bias"]
-    b_mlp1 += params[f"h.{layer}.ln_2.bias"] @ params[f"h.{layer}.mlp.c_fc.weight"]
-    w_mlp1 = params[f"h.{layer}.mlp.c_fc.weight"]
-    w_mlp1 *= params[f"h.{layer}.ln_2.weight"][:, None] * np.sqrt(n_embd)
-    b_mlp2 = params[f"h.{layer}.mlp.c_proj.bias"]
-    b_mlp2 -= b_mlp2.mean(keepdims=True)
-    w_mlp2 = params[f"h.{layer}.mlp.c_proj.weight"]
-    w_mlp2 -= w_mlp2.mean(axis=-1, keepdims=True)
-    return TransformerBlock(
-        layer, b_qkv, w_qkv, b_out, w_out, b_mlp1, w_mlp1, b_mlp2, w_mlp2
-    )
+def softmax(x):
+    exp_x = np.exp(x - np.max(x))
+    return exp_x / np.sum(exp_x)
 
 
 def nested_vmap(f, X, *Xs):
@@ -160,29 +113,22 @@ def call_block(b, x):
     return x, cache_attn
 
 
-blocks = [new_block(layer) for layer in range(n_layer)]
-
-
-def gpt2(prompt_tokens, output_batch=0):
+def gpt2(params, prompt_tokens, output_batch=0):
     n_seq = prompt_tokens.shape[0]
-    x = wte[prompt_tokens] + wpe[:n_seq]
+    x = params.wte[prompt_tokens] + params.wpe[:n_seq]
     x = np.stack([x] * n_batch)
     cache_attn = []
-    for block in blocks:
+    for block in params.blocks:
         x, cache_attn_layer = call_block(block, x)
         cache_attn.append(cache_attn_layer)
         # assert x.mean() < 1e-5
-    final = normalise_rows(x[output_batch]) * w_ln + b_ln
-    logits = final @ w_unembed
+    final = normalise_rows(x[output_batch]) * params.w_ln + params.b_ln
+    logits = final @ params.w_unembed
     return logits, cache_attn
 
 
-def softmax(x):
-    exp_x = np.exp(x - np.max(x))
-    return exp_x / np.sum(exp_x)
-
-
 def main():
+    params = load_gpt2()
     prompt_tokens = encoder.encode(
         "Alan Turing theorized that computers would one day become"
     )
@@ -191,7 +137,7 @@ def main():
     total = len(tokens) + 40
     assert total < n_ctx
     for posn in range(len(prompt_tokens) - 1, total):
-        logits, cache_attn = gpt2(np.array(tokens + [0] * (total - len(tokens))))
+        logits, cache_attn = gpt2(params, np.array(tokens + [0] * (total - len(tokens))))
         logits = logits[posn]
         token = int(np.argmax(logits))
 
