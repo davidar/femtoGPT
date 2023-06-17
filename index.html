@@ -1,0 +1,30 @@
+<html>
+  <head>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs/dist/tf.min.js"> </script>
+    <script src="https://unpkg.com/gpt-tokenizer/dist/r50k_base.js"></script>
+    <script>
+    (async function () {
+        console.log('loading model');
+        const model = await tf.loadGraphModel('tfjs_model/model.json');
+        const tokens = [36235, 39141, 18765, 1143, 326, 9061, 561, 530, 1110, 1716];
+        const n_ctx = 64;
+
+        const { encode, decode } = GPTTokenizer_r50k_base;
+
+        const n_vocab = 50257;
+        const total = tokens.length + 40;
+        console.log(tokens, decode(tokens));
+        for (let posn = tokens.length - 1; posn < total; posn++) {
+            const x = tf.tensor(tokens.concat(Array(n_ctx - tokens.length).fill(50256)), [n_ctx], 'int32');
+            let [cache, logits] = await model.executeAsync(x);
+            logits = logits.slice([posn, 0], [1, n_vocab]);
+            const token = tf.argMax(logits, 1).dataSync()[0];
+            tokens.push(token);
+            console.log(token, decode([token]));
+        }
+    })();
+    </script>
+  </head>
+  <body>
+  </body>
+</html>
