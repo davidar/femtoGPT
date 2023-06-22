@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 import functools
@@ -12,6 +13,7 @@ from jax.scipy.special import erf
 import einops
 from print_color import print
 import streamlit as st
+import streamlit.components.v1 as components
 
 from encoder import get_encoder
 from gpt2_weights import load_gpt2
@@ -130,6 +132,7 @@ def gpt2(params, prompt_tokens, output_batch=0):
 
 
 def main():
+    st.set_page_config(layout="wide")
     params = load_gpt2()
     prompt_tokens = encoder.encode(
         "Alan Turing theorized that computers would one day become"
@@ -144,6 +147,28 @@ def main():
         logits, cache_attn = gpt2(
             params, np.array(tokens + [n_vocab - 1] * (total - len(tokens)))
         )
+        params = {
+            "tokens": [encoder.decode([int(t)]) for t in tokens],
+            "attention": cache_attn[5][0, :, :, :].swapaxes(0, 1).tolist(),
+        }
+        components.html(
+            """
+            <div id="hello-div" style="margin: 15px 0;"/>
+            <script crossorigin type="module">
+            import { render, AttentionPatterns } from "https://unpkg.com/circuitsvis@1.40.0/dist/cdn/esm.js";
+            render(
+            "hello-div",
+            AttentionPatterns,
+            """
+            + json.dumps(params)
+            + """
+            )
+            </script>
+            """,
+            height=450,
+            scrolling=True,
+        )
+        break
         logits = logits[posn]
         token = int(np.argmax(logits))
 
