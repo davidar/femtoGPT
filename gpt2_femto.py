@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import functools
 import json
 import jax
@@ -7,8 +10,8 @@ import jax.experimental.compilation_cache.compilation_cache
 import jax.numpy as np
 from jax.scipy.special import erf
 import einops
-
 from print_color import print
+import streamlit as st
 
 from encoder import get_encoder
 from gpt2_weights import load_gpt2
@@ -132,7 +135,9 @@ def main():
         "Alan Turing theorized that computers would one day become"
     )
     tokens = prompt_tokens[:]
-    print(encoder.decode(tokens), end="", flush=True)
+    result = st.empty()
+    text = encoder.decode(tokens)
+    result.write(text)
     total = len(tokens) + 40
     assert total < n_ctx
     for posn in range(len(prompt_tokens) - 1, total):
@@ -146,7 +151,8 @@ def main():
             tokens.append(token)
             # for token, prob in zip(top_k, top_k_probs):
             #     print(encoder.decode([token]), prob, end="; ", flush=True)
-        print(encoder.decode([tokens[posn + 1]]), end="", flush=True)
+        text += encoder.decode([tokens[posn + 1]])
+        result.write(text)
 
 
 if __name__ == "__main__":
