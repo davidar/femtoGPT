@@ -11,6 +11,7 @@ import jax.experimental.compilation_cache.compilation_cache
 import jax.numpy as np
 from jax.scipy.special import erf
 import einops
+import pandas as pd
 from print_color import print
 import streamlit as st
 import streamlit.components.v1 as components
@@ -122,22 +123,41 @@ def gpt2(params, prompt_tokens, output_batch=0):
     x = params.wte[prompt_tokens] + params.wpe[:n_seq]
     x = np.stack([x] * n_batch)
     cache_attn = []
+    cache_x = []
     for block in params.blocks:
         x, cache_attn_layer = call_block(block, x)
         cache_attn.append(cache_attn_layer)
+        cache_x.append(x)
         # assert x.mean() < 1e-5
     final = normalise_rows(x[output_batch]) * params.w_ln + params.b_ln
     logits = final @ params.w_unembed
-    return logits, cache_attn
+    return logits, cache_attn, cache_x
 
 
 def main():
     st.set_page_config(layout="wide")
     params = load_gpt2()
     tokens = encoder.encode("Mr Dursley said something to Mrs Dursley")
-    logits, cache_attn = gpt2(params, np.array(tokens))
+    logits, cache_attn, cache_x = gpt2(params, np.array(tokens))
     divs = ""
     renders = ""
+
+    st.markdown("## Logit lens")
+    table = []
+    for posn, token in enumerate(tokens):
+        row = []
+        row.append(encoder.decode([int(token)]))
+        for layer in range(n_layer):
+            x = cache_x[layer][0, posn, :]
+            final = normalise_rows(x) * params.w_ln + params.b_ln
+            logits = final @ params.w_unembed
+            top_token = np.argmax(logits)
+            row.append(encoder.decode([int(top_token)]))
+        table.append(row)
+    st.table(
+        pd.DataFrame(table, columns=["Input"] + [f"Layer {i}" for i in range(n_layer)])
+    )
+
     for layer in range(n_layer):
         params = {
             "tokens": [encoder.decode([int(t)]) for t in tokens],

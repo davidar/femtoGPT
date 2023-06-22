@@ -9,6 +9,7 @@ tqdm==4.65.0
 einops==0.6.1
 streamlit==1.23.1
 python-dotenv==1.0.0
+pandas==2.0.2
 
 -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 jax[cuda12_pip]==0.4.11
