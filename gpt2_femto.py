@@ -136,23 +136,26 @@ def main():
     params = load_gpt2()
     tokens = encoder.encode("Mr Dursley said something to Mrs Dursley")
     logits, cache_attn = gpt2(params, np.array(tokens))
+    divs = ""
+    renders = ""
     for layer in range(n_layer):
-        st.markdown(f"## Layer {layer}")
         params = {
             "tokens": [encoder.decode([int(t)]) for t in tokens],
             "attention": cache_attn[layer][0, :, :, :].swapaxes(0, 1).tolist(),
         }
-        components.html(
-            f"""
-            <div id="layer-{layer}" style="margin: 15px 0;"/>
-            <script crossorigin type="module">
-            import {{ render, AttentionPatterns }} from "https://unpkg.com/circuitsvis@1.40.0/dist/cdn/esm.js";
-            render("layer-{layer}", AttentionPatterns, {json.dumps(params)})
-            </script>
-            """,
-            height=450,
-            scrolling=True,
-        )
+        divs += f'<h2>Layer {layer}</h2><div id="layer-{layer}"></div>'
+        renders += f'render("layer-{layer}", AttentionPatterns, {json.dumps(params)});'
+    components.html(
+        f"""
+        {divs}
+        <script crossorigin type="module">
+        import {{ render, AttentionPatterns }} from "https://unpkg.com/circuitsvis@1.40.0/dist/cdn/esm.js";
+        {renders}
+        </script>
+        """,
+        height=900,
+        scrolling=True,
+    )
 
 
 if __name__ == "__main__":
