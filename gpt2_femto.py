@@ -134,50 +134,25 @@ def gpt2(params, prompt_tokens, output_batch=0):
 def main():
     st.set_page_config(layout="wide")
     params = load_gpt2()
-    prompt_tokens = encoder.encode(
-        "Alan Turing theorized that computers would one day become"
-    )
-    tokens = prompt_tokens[:]
-    result = st.empty()
-    text = encoder.decode(tokens)
-    result.write(text)
-    total = len(tokens) + 40
-    assert total < n_ctx
-    for posn in range(len(prompt_tokens) - 1, total):
-        logits, cache_attn = gpt2(
-            params, np.array(tokens + [n_vocab - 1] * (total - len(tokens)))
-        )
+    tokens = encoder.encode("Mr Dursley said something to Mrs Dursley")
+    logits, cache_attn = gpt2(params, np.array(tokens))
+    for layer in range(n_layer):
+        st.markdown(f"## Layer {layer}")
         params = {
             "tokens": [encoder.decode([int(t)]) for t in tokens],
-            "attention": cache_attn[5][0, :, :, :].swapaxes(0, 1).tolist(),
+            "attention": cache_attn[layer][0, :, :, :].swapaxes(0, 1).tolist(),
         }
         components.html(
-            """
-            <div id="hello-div" style="margin: 15px 0;"/>
+            f"""
+            <div id="layer-{layer}" style="margin: 15px 0;"/>
             <script crossorigin type="module">
-            import { render, AttentionPatterns } from "https://unpkg.com/circuitsvis@1.40.0/dist/cdn/esm.js";
-            render(
-            "hello-div",
-            AttentionPatterns,
-            """
-            + json.dumps(params)
-            + """
-            )
+            import {{ render, AttentionPatterns }} from "https://unpkg.com/circuitsvis@1.40.0/dist/cdn/esm.js";
+            render("layer-{layer}", AttentionPatterns, {json.dumps(params)})
             </script>
             """,
             height=450,
             scrolling=True,
         )
-        break
-        logits = logits[posn]
-        token = int(np.argmax(logits))
-
-        if posn + 1 >= len(tokens):
-            tokens.append(token)
-            # for token, prob in zip(top_k, top_k_probs):
-            #     print(encoder.decode([token]), prob, end="; ", flush=True)
-        text += encoder.decode([tokens[posn + 1]])
-        result.write(text)
 
 
 if __name__ == "__main__":
